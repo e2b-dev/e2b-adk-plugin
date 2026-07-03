@@ -37,9 +37,13 @@ class SandboxManager:
     async def shutdown(self) -> None:
         """Kill the sandbox if one exists and clear the cache.
 
-        A no-op when no sandbox was ever created. After shutdown, a later
-        ``get()`` lazily creates a fresh sandbox.
+        A no-op when no sandbox was ever created. The cache is cleared even if
+        ``kill()`` raises (the error still propagates), so a dead sandbox is
+        never handed back — after shutdown, a later ``get()`` lazily creates a
+        fresh sandbox.
         """
         if self._sandbox is not None:
-            await self._sandbox.kill()
-            self._sandbox = None
+            try:
+                await self._sandbox.kill()
+            finally:
+                self._sandbox = None
