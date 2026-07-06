@@ -1,5 +1,6 @@
-.claude/
-e2b-adk/
+/.agents/
+/.claude/
+/.planning/
 
 # Python
 .venv/
@@ -11,6 +12,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Features
 /features/
 /CLAUDE.md
 /AGENTS.md
@@ -19,4 +22,4 @@ build/
 
 # Verification credentials (never commit)
 .env.verification
-.claude/verification/auth-state.json
+/.claude/verification/auth-state.json
