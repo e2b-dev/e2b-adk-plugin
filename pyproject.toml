@@ -33,6 +33,9 @@ dev = [
     "mypy",
     "build",
 ]
+examples = [
+    "python-dotenv",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["e2b_adk"]
