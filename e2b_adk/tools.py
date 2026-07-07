@@ -130,8 +130,11 @@ class RunCode(BaseTool):
     ) -> dict[str, Any]:
         """Execute code inside the E2B sandbox."""
         code: str = args["code"]
-        # Normalize case so e.g. "Python"/"JavaScript" match E2B's lowercase set.
-        language: str = args.get("language", "python").lower()
+        # Default to Python and normalize case so e.g. "Python" matches E2B's
+        # lowercase set. Guard against a null / non-string arg so normalization
+        # never raises out of run_async (which would abort the agent run).
+        raw_language = args.get("language") or "python"
+        language: str = raw_language.lower() if isinstance(raw_language, str) else "python"
         envs: dict[str, str] | None = args.get("envs")
         timeout: int | None = args.get("timeout")
 
@@ -157,9 +160,10 @@ class RunCode(BaseTool):
         stdout = truncate_output(_join(execution.logs.stdout))
         stderr = truncate_output(_join(execution.logs.stderr))
 
-        text = ""
-        if execution.results:
-            text = truncate_output(execution.results[0].text or "")
+        # execution.text is the main-result text (the last expression's value),
+        # not merely the first result — which may be a display output (chart,
+        # rich repr) rather than the return value. None when there is no result.
+        text = truncate_output(execution.text or "")
 
         error = ""
         if execution.error is not None:

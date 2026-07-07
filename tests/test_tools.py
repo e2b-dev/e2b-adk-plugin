@@ -21,12 +21,16 @@ def _execution(
     *,
     stdout: list[str] | None = None,
     stderr: list[str] | None = None,
-    results: list | None = None,
+    text: str | None = None,
     error: object | None = None,
 ) -> SimpleNamespace:
-    """Build a fake E2B ``Execution`` object."""
+    """Build a fake E2B ``Execution``.
+
+    ``text`` mirrors the real ``Execution.text`` property (the main-result
+    value), which is what the tool reads.
+    """
     logs = SimpleNamespace(stdout=stdout or [], stderr=stderr or [])
-    return SimpleNamespace(logs=logs, results=results or [], error=error)
+    return SimpleNamespace(logs=logs, text=text, error=error)
 
 
 def _make_run_code(mock_sandbox: MagicMock) -> RunCode:
@@ -51,7 +55,7 @@ async def test_run_code_success(mock_sandbox: MagicMock) -> None:
         return_value=_execution(
             stdout=["hello\n", "world\n"],
             stderr=["warn\n"],
-            results=[SimpleNamespace(text="42")],
+            text="42",
             error=None,
         )
     )
@@ -134,6 +138,22 @@ async def test_run_code_language_lowercased(mock_sandbox: MagicMock) -> None:
     )
 
     assert mock_sandbox.run_code.await_args.kwargs["language"] == "javascript"
+
+
+async def test_run_code_null_language_defaults_without_raising(
+    mock_sandbox: MagicMock,
+) -> None:
+    # A null language (or a non-string) must not raise out of run_async; it
+    # falls back to python so the agent run is never aborted.
+    mock_sandbox.run_code = AsyncMock(return_value=_execution(error=None))
+    tool = _make_run_code(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"code": "print(1)", "language": None}, tool_context=None
+    )
+
+    assert result["success"] is True
+    assert mock_sandbox.run_code.await_args.kwargs["language"] == "python"
 
 
 # --------------------------------------------------------------------------- #
