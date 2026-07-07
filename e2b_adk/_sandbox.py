@@ -1,4 +1,4 @@
-"""Lazy E2B sandbox lifecycle management (FEATURE_TECHNICAL_SPEC §3.2).
+"""Lazy E2B sandbox lifecycle management.
 
 ``SandboxManager`` owns a single ``AsyncSandbox`` that is created lazily on the
 first tool call and reused for the lifetime of the plugin instance, then torn

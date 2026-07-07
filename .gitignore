@@ -19,6 +19,7 @@ build/
 /AGENTS.md
 /CLAUDE_ADDITIONS.md
 /AGENTS_ADDITIONS.md
+/DECISIONS.md
 
 # Environment
 .env

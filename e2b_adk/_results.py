@@ -1,7 +1,7 @@
 """Result-contract helpers and output truncation shared by all tools.
 
 Pure, dependency-free functions (no E2B/ADK imports). Every tool returns a
-JSON-serializable ``dict`` following a single shape (FEATURE_TECHNICAL_SPEC §5):
+JSON-serializable ``dict`` following a single shape:
 
 * Success results carry ``success: True`` plus tool-specific fields.
 * Failure results carry ``success: False``, a human-readable ``error``, the

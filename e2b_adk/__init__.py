@@ -1,4 +1,8 @@
-"""e2b-adk — Google ADK plugin backed by E2B sandboxes.
+"""e2b-adk — Google ADK plugin backed by E2B sandboxes."""
 
-Package marker. Public exports (e.g. ``E2BPlugin``) are filled in later phases.
-"""
+from __future__ import annotations
+
+from .plugin import E2BPlugin
+from .tools import RunCode, RunCommand
+
+__all__ = ["E2BPlugin", "RunCode", "RunCommand"]

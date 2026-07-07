@@ -54,10 +54,14 @@ warn_unused_configs = true
 warn_return_any = true
 disallow_untyped_defs = true
 
-# Third-party SDKs ship without type stubs / py.typed markers.
+# Third-party SDKs ship without type stubs / py.typed markers. They also
+# re-export public names through their package __init__ without an explicit
+# __all__, so allow those implicit re-exports rather than reaching into
+# private submodules.
 [[tool.mypy.overrides]]
-module = ["e2b_code_interpreter.*", "google.adk.*"]
+module = ["e2b_code_interpreter.*", "google.adk.*", "google.genai.*"]
 ignore_missing_imports = true
+implicit_reexport = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
