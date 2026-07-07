@@ -84,6 +84,23 @@ def _normalize_type(file_type: FileType | None) -> str:
     return str(file_type.value)
 
 
+def _require_str(args: dict[str, Any], key: str, *, allow_empty: bool = False) -> str | None:
+    """Return ``args[key]`` when it is a valid string, else ``None``.
+
+    Guards a *required* argument so a malformed tool call (a missing or
+    non-string value) is turned into a returned failure rather than a ``KeyError``
+    raised out of ``run_async`` — the tools must never raise. ``allow_empty=True``
+    permits ``""`` (e.g. writing an empty file); otherwise an empty string is
+    rejected like a missing value.
+    """
+    value = args.get(key)
+    if not isinstance(value, str):
+        return None
+    if not value and not allow_empty:
+        return None
+    return value
+
+
 class RunCode(BaseTool):
     """Execute a code snippet inside the E2B sandbox and return its output.
 
@@ -143,7 +160,9 @@ class RunCode(BaseTool):
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any]:
         """Execute code inside the E2B sandbox."""
-        code: str = args["code"]
+        code = _require_str(args, "code")
+        if code is None:
+            return failure_result("Missing or invalid required argument: code")
         # Default to Python and normalize case so e.g. "Python" matches E2B's
         # lowercase set. Guard against a null / non-string arg so normalization
         # never raises out of run_async (which would abort the agent run).
@@ -250,7 +269,9 @@ class RunCommand(BaseTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any]:
-        command: str = args["command"]
+        command = _require_str(args, "command")
+        if command is None:
+            return failure_result("Missing or invalid required argument: command")
         cwd: str | None = args.get("cwd")
         envs: dict[str, str] | None = args.get("envs")
         timeout: int | None = args.get("timeout")
@@ -330,8 +351,14 @@ class WriteFile(BaseTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any]:
-        path: str = args["path"]
-        content: str = args["content"]
+        path = _require_str(args, "path")
+        if path is None:
+            return failure_result("Missing or invalid required argument: path")
+        content = _require_str(args, "content", allow_empty=True)
+        if content is None:
+            return failure_result(
+                "Missing or invalid required argument: content", path=path
+            )
 
         try:
             sandbox = await self.manager.get()
@@ -387,7 +414,9 @@ class ReadFile(BaseTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any]:
-        path: str = args["path"]
+        path = _require_str(args, "path")
+        if path is None:
+            return failure_result("Missing or invalid required argument: path")
 
         try:
             sandbox = await self.manager.get()
@@ -533,7 +562,9 @@ class StartBackgroundCommand(BaseTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> dict[str, Any]:
-        command: str = args["command"]
+        command = _require_str(args, "command")
+        if command is None:
+            return failure_result("Missing or invalid required argument: command")
         port: int | None = args.get("port")
         cwd: str | None = args.get("cwd")
         envs: dict[str, str] | None = args.get("envs")
@@ -556,7 +587,19 @@ class StartBackgroundCommand(BaseTool):
         if port is None:
             return success_result(command=command, pid=handle.pid, preview_url=None)
 
-        host = sandbox.get_host(port)
+        # The command already started (we hold its pid), so a failure to build the
+        # preview URL must not raise or lose that pid — degrade to no URL instead.
+        try:
+            host = sandbox.get_host(port)
+        except Exception as exc:  # noqa: BLE001 — never raise out of run_async
+            logger.debug("start_background_command: could not resolve host: %s", exc)
+            return success_result(
+                command=command,
+                pid=handle.pid,
+                preview_url=None,
+                readiness="unknown",
+            )
+
         return success_result(
             command=command,
             pid=handle.pid,

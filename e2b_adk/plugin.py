@@ -30,6 +30,21 @@ from .tools import (
 
 logger = logging.getLogger(__name__)
 
+#: Tool-arg keys whose *values* are masked before logging: ``envs`` may carry
+#: credentials, and ``content`` / ``code`` may be large or sensitive payloads.
+#: Other args (path, command, port, ...) are logged as-is to keep the trace useful.
+_SENSITIVE_ARG_KEYS = frozenset({"content", "code", "envs"})
+
+
+def _redact_args(tool_args: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of ``tool_args`` with sensitive values masked."""
+    if not isinstance(tool_args, dict):
+        return tool_args
+    return {
+        key: ("<redacted>" if key in _SENSITIVE_ARG_KEYS else value)
+        for key, value in tool_args.items()
+    }
+
 
 class E2BPlugin(BasePlugin):
     """ADK plugin that runs tool calls inside a shared E2B sandbox.
@@ -91,7 +106,7 @@ class E2BPlugin(BasePlugin):
         tool_context: ToolContext,
     ) -> dict[str, Any] | None:
         """Log the tool about to run inside the sandbox (non-intrusive)."""
-        logger.debug("E2B tool starting: %s args=%s", tool.name, tool_args)
+        logger.debug("E2B tool starting: %s args=%s", tool.name, _redact_args(tool_args))
         return None
 
     async def after_tool_callback(

@@ -109,3 +109,28 @@ async def test_on_tool_error_callback_logs_and_returns_none(
 
     assert out is None
     assert "uncaught exception" in caplog.text
+
+
+async def test_before_tool_callback_redacts_sensitive_args(
+    caplog: LogCaptureFixture,
+) -> None:
+    plugin = E2BPlugin()
+    tool = MagicMock(name="tool")
+    tool.name = "write_file"
+
+    with caplog.at_level(logging.DEBUG, logger="e2b_adk.plugin"):
+        await plugin.before_tool_callback(
+            tool=tool,
+            tool_args={
+                "path": "/app/main.py",
+                "content": "SUPER_SECRET_SOURCE",
+                "envs": {"API_TOKEN": "sk-do-not-log"},
+            },
+            tool_context=None,
+        )
+
+    # Secret-prone / large values are masked; harmless args stay for debugging.
+    assert "SUPER_SECRET_SOURCE" not in caplog.text
+    assert "sk-do-not-log" not in caplog.text
+    assert "<redacted>" in caplog.text
+    assert "/app/main.py" in caplog.text

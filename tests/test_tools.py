@@ -469,3 +469,65 @@ async def test_background_start_failure(mock_sandbox: MagicMock) -> None:
 def test_background_is_long_running(mock_sandbox: MagicMock) -> None:
     tool = _make_background(mock_sandbox)
     assert tool.is_long_running is True
+
+
+async def test_background_get_host_failure_degrades(mock_sandbox: MagicMock) -> None:
+    # The command started (we have its pid); a get_host failure must NOT raise and
+    # must NOT lose the pid — it degrades to no preview URL.
+    mock_sandbox.commands = MagicMock()
+    mock_sandbox.commands.run = AsyncMock(return_value=SimpleNamespace(pid=777))
+    mock_sandbox.get_host = MagicMock(side_effect=RuntimeError("no host"))
+    tool = _make_background(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"command": "python -m http.server 3000", "port": 3000},
+        tool_context=None,
+    )
+
+    assert result["success"] is True  # the command did start
+    assert result["pid"] == 777
+    assert result.get("preview_url") is None
+    assert result["readiness"] == "unknown"
+    assert isinstance(result, dict)  # never raised
+
+
+# --------------------------------------------------------------------------- #
+# Malformed args must never raise out of run_async (return a failure result).
+# --------------------------------------------------------------------------- #
+
+
+async def test_missing_required_args_never_raise(mock_sandbox: MagicMock) -> None:
+    # Each tool indexes required args; a malformed call (missing them) must return
+    # a failure dict, never raise a KeyError out of run_async.
+    cases = [
+        (_make_run_code(mock_sandbox), {}),  # no "code"
+        (_make_run_command(mock_sandbox), {}),  # no "command"
+        (_make_write_file(mock_sandbox), {"content": "x"}),  # no "path"
+        (_make_read_file(mock_sandbox), {}),  # no "path"
+        (_make_background(mock_sandbox), {"port": 8080}),  # no "command"
+    ]
+    for tool, bad_args in cases:
+        result = await tool.run_async(args=bad_args, tool_context=None)
+        assert isinstance(result, dict), f"{tool.name} raised instead of returning"
+        assert result["success"] is False
+        assert "required argument" in result["error"].lower()
+
+
+async def test_write_file_allows_empty_content(mock_sandbox: MagicMock) -> None:
+    # An empty string is a valid file body — the required-arg guard must allow it.
+    written: dict[str, str] = {}
+    mock_sandbox.files = MagicMock()
+
+    async def _write(path: str, data: str) -> object:
+        written[path] = data
+        return SimpleNamespace(path=path)
+
+    mock_sandbox.files.write = AsyncMock(side_effect=_write)
+    tool = _make_write_file(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"path": "/empty.txt", "content": ""}, tool_context=None
+    )
+
+    assert result["success"] is True
+    assert written["/empty.txt"] == ""
