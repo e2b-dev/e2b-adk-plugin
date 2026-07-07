@@ -26,7 +26,7 @@ class SandboxManager:
     def __init__(self, **opts: Any) -> None:
         self._opts: dict[str, Any] = opts
         self._sandbox: AsyncSandbox | None = None
-        self._lock = asyncio.Lock() # ask if needed
+        self._lock = asyncio.Lock()
 
     async def get(self) -> AsyncSandbox:
         """Return the live sandbox, creating it on the first call and caching it.

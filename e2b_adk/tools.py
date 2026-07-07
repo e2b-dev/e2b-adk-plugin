@@ -41,10 +41,6 @@ def _supported_languages() -> list[str]:
     the alias shape ever changes (``run_code`` still accepts any string).
     """
     args = get_args(RunCodeLanguage)
-    # Bare ``Literal["python", ...]`` → args are the strings themselves.
-    if args and all(isinstance(a, str) for a in args):
-        return list(args)
-    # ``Union[Literal[...], str]`` → find the Literal member and unpack it.
     for arg in args:
         members = get_args(arg)
         if members and all(isinstance(m, str) for m in members):
