@@ -22,14 +22,22 @@ def test_no_sandbox_on_init(patched_create: AsyncMock) -> None:
     patched_create.assert_not_called()
 
 
-def test_get_tools_shared_manager(patched_create: AsyncMock) -> None:
+def test_get_tools_returns_six_shared(patched_create: AsyncMock) -> None:
     plugin = E2BPlugin()
 
     tools = plugin.get_tools()
 
-    # The two execution tools are returned...
+    # All six tools are returned...
     names = {tool.name for tool in tools}
-    assert names == {"run_code", "run_command"}
+    assert names == {
+        "run_code",
+        "run_command",
+        "write_file",
+        "read_file",
+        "list_files",
+        "start_background_command",
+    }
+    assert len(tools) == 6
 
     # ...and every tool shares the exact same SandboxManager instance.
     managers = [tool.manager for tool in tools]

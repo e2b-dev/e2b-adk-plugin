@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 from .plugin import E2BPlugin
-from .tools import RunCode, RunCommand
+from .tools import (
+    ListFiles,
+    ReadFile,
+    RunCode,
+    RunCommand,
+    StartBackgroundCommand,
+    WriteFile,
+)
 
-__all__ = ["E2BPlugin", "RunCode", "RunCommand"]
+__all__ = [
+    "E2BPlugin",
+    "ListFiles",
+    "ReadFile",
+    "RunCode",
+    "RunCommand",
+    "StartBackgroundCommand",
+    "WriteFile",
+]

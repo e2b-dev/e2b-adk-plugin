@@ -1,11 +1,16 @@
 """ADK ``BaseTool`` subclasses that execute inside the E2B sandbox.
 
-Two execution tools land here:
+The tools land here:
 
 * ``RunCode`` (``run_code``) — run a code snippet in the sandbox interpreter.
 * ``RunCommand`` (``run_command``) — run a shell command in the sandbox.
+* ``WriteFile`` (``write_file``) — write a file into the sandbox filesystem.
+* ``ReadFile`` (``read_file``) — read a file from the sandbox filesystem.
+* ``ListFiles`` (``list_files``) — list a directory in the sandbox filesystem.
+* ``StartBackgroundCommand`` (``start_background_command``) — start a
+  long-running command (e.g. a dev server) and return immediately.
 
-Both follow the single result contract from :mod:`e2b_adk._results`:
+All follow the single result contract from :mod:`e2b_adk._results`:
 
 * The tool *ran* (even if the user's code raised or the command exited
   non-zero) → ``success: True`` with the captured output / normalized error.
@@ -21,7 +26,7 @@ from __future__ import annotations
 import logging
 from typing import Any, get_args
 
-from e2b_code_interpreter import CommandExitException, RunCodeLanguage
+from e2b_code_interpreter import CommandExitException, FileType, RunCodeLanguage
 from google.adk.tools import BaseTool, ToolContext
 from google.genai import types
 
@@ -64,6 +69,19 @@ def _join(chunks: list[str] | None) -> str:
     if not chunks:
         return ""
     return "".join(chunks)
+
+
+def _normalize_type(file_type: FileType | None) -> str:
+    """Normalize an E2B ``FileType`` entry to a plain string.
+
+    ``FileType.FILE`` / ``FileType.DIR`` map to their ``.value`` (``"file"`` /
+    ``"dir"``). A ``None`` type (E2B may omit it for an entry it cannot classify)
+    collapses to ``"unknown"`` so every entry carries a JSON-friendly string
+    ``type`` and callers never have to handle ``None``.
+    """
+    if file_type is None:
+        return "unknown"
+    return str(file_type.value)
 
 
 class RunCode(BaseTool):
@@ -137,7 +155,7 @@ class RunCode(BaseTool):
         try:
             sandbox = await self.manager.get()
         except Exception as exc:  # noqa: BLE001 — never raise out of run_async
-            logger.warning("run_code: sandbox unavailable: %s", exc)
+            logger.debug("run_code: sandbox unavailable: %s", exc)
             return failure_result(f"Sandbox unavailable: {exc}")
 
         try:
@@ -150,7 +168,7 @@ class RunCode(BaseTool):
                 timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 — SDK/timeout failure → success:false
-            logger.warning("run_code: execution could not run: %s", exc)
+            logger.debug("run_code: execution could not run: %s", exc)
             return failure_result(f"Failed to run code: {exc}")
 
         stdout = truncate_output(_join(execution.logs.stdout))
@@ -240,7 +258,7 @@ class RunCommand(BaseTool):
         try:
             sandbox = await self.manager.get()
         except Exception as exc:  # noqa: BLE001 — never raise out of run_async
-            logger.warning("run_command: sandbox unavailable: %s", exc)
+            logger.debug("run_command: sandbox unavailable: %s", exc)
             return failure_result(f"Sandbox unavailable: {exc}", command=command)
 
         run_kwargs: dict[str, Any] = {"cwd": cwd, "envs": envs}
@@ -258,7 +276,7 @@ class RunCommand(BaseTool):
                 exit_code=exc.exit_code,
             )
         except Exception as exc:  # noqa: BLE001 — SDK/timeout failure → success:false
-            logger.warning("run_command: command could not run: %s", exc)
+            logger.debug("run_command: command could not run: %s", exc)
             return failure_result(f"Failed to run command: {exc}", command=command)
 
         return success_result(
@@ -266,4 +284,282 @@ class RunCommand(BaseTool):
             stdout=truncate_output(result.stdout or ""),
             stderr=truncate_output(result.stderr or ""),
             exit_code=result.exit_code,
+        )
+
+
+class WriteFile(BaseTool):
+    """Write a file into the E2B sandbox filesystem.
+
+    Backed by ``AsyncSandbox.files.write``. The write *running* — even to an
+    existing file, which it overwrites — is a successful tool call. Only an
+    inability to write (sandbox unavailable, non-writable / invalid path, SDK
+    error) yields ``success: False`` with the echoed ``path``.
+    """
+
+    def __init__(self, manager: SandboxManager) -> None:
+        super().__init__(
+            name="write_file",
+            description=(
+                "Write a text file into an isolated E2B sandbox at the given "
+                "path, creating or overwriting it. Use this to place source "
+                "files, configs, or data into the sandbox before running them."
+            ),
+        )
+        self.manager = manager
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "path": types.Schema(
+                        type=types.Type.STRING,
+                        description="Destination path for the file in the sandbox.",
+                    ),
+                    "content": types.Schema(
+                        type=types.Type.STRING,
+                        description="The text content to write to the file.",
+                    ),
+                },
+                required=["path", "content"],
+            ),
+        )
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> dict[str, Any]:
+        path: str = args["path"]
+        content: str = args["content"]
+
+        try:
+            sandbox = await self.manager.get()
+        except Exception as exc:  # noqa: BLE001 — never raise out of run_async
+            logger.debug("write_file: sandbox unavailable: %s", exc)
+            return failure_result(f"Sandbox unavailable: {exc}", path=path)
+
+        try:
+            await sandbox.files.write(path, content)
+        except Exception as exc:  # noqa: BLE001 — SDK/path failure → success:false
+            logger.debug("write_file: could not write %s: %s", path, exc)
+            return failure_result(f"Failed to write file: {exc}", path=path)
+
+        return success_result(path=path)
+
+
+class ReadFile(BaseTool):
+    """Read a text file from the E2B sandbox filesystem.
+
+    Backed by ``AsyncSandbox.files.read`` (text format). A missing file, an
+    unavailable sandbox, or an SDK error yields ``success: False`` with the
+    echoed ``path``; the returned ``content`` is truncated per the result
+    contract so a large file cannot exhaust the agent's context window.
+    """
+
+    def __init__(self, manager: SandboxManager) -> None:
+        super().__init__(
+            name="read_file",
+            description=(
+                "Read a text file from an isolated E2B sandbox at the given "
+                "path and return its content. Use this to inspect files the "
+                "sandbox produced or that you wrote earlier."
+            ),
+        )
+        self.manager = manager
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "path": types.Schema(
+                        type=types.Type.STRING,
+                        description="Path of the file to read from the sandbox.",
+                    ),
+                },
+                required=["path"],
+            ),
+        )
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> dict[str, Any]:
+        path: str = args["path"]
+
+        try:
+            sandbox = await self.manager.get()
+        except Exception as exc:  # noqa: BLE001 — never raise out of run_async
+            logger.debug("read_file: sandbox unavailable: %s", exc)
+            return failure_result(f"Sandbox unavailable: {exc}", path=path)
+
+        try:
+            content = await sandbox.files.read(path)
+        except Exception as exc:  # noqa: BLE001 — missing/SDK failure → success:false
+            logger.debug("read_file: could not read %s: %s", path, exc)
+            return failure_result(f"Failed to read file: {exc}", path=path)
+
+        return success_result(path=path, content=truncate_output(content or ""))
+
+
+class ListFiles(BaseTool):
+    """List a directory in the E2B sandbox filesystem.
+
+    Backed by ``AsyncSandbox.files.list``. Returns one ``entries`` element per
+    child, each ``{"name": ..., "type": ...}`` where ``type`` is the normalized
+    string ``"file"`` / ``"dir"`` (or ``"unknown"`` when E2B omits it). A
+    non-existent directory or SDK error yields ``success: False`` with the
+    echoed ``path``.
+    """
+
+    def __init__(self, manager: SandboxManager) -> None:
+        super().__init__(
+            name="list_files",
+            description=(
+                "List the entries of a directory in an isolated E2B sandbox. "
+                "Returns each child's name and type (file or dir). Defaults to "
+                "the current directory. Use this to explore the sandbox "
+                "filesystem."
+            ),
+        )
+        self.manager = manager
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "path": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "Directory to list in the sandbox. Optional; "
+                            "defaults to '.' (the current directory)."
+                        ),
+                    ),
+                },
+            ),
+        )
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> dict[str, Any]:
+        path: str = args.get("path") or "."
+
+        try:
+            sandbox = await self.manager.get()
+        except Exception as exc:  # noqa: BLE001 — never raise out of run_async
+            logger.debug("list_files: sandbox unavailable: %s", exc)
+            return failure_result(f"Sandbox unavailable: {exc}", path=path)
+
+        try:
+            entries = await sandbox.files.list(path)
+        except Exception as exc:  # noqa: BLE001 — missing dir/SDK failure → success:false
+            logger.debug("list_files: could not list %s: %s", path, exc)
+            return failure_result(f"Failed to list directory: {exc}", path=path)
+
+        return success_result(
+            path=path,
+            entries=[
+                {"name": entry.name, "type": _normalize_type(entry.type)}
+                for entry in entries
+            ],
+        )
+
+
+class StartBackgroundCommand(BaseTool):
+    """Start a long-running command in the E2B sandbox and return immediately.
+
+    Backed by ``AsyncSandbox.commands.run(..., background=True)``, which returns
+    an ``AsyncCommandHandle`` right away; this tool reports its ``pid`` without
+    waiting for the process to become ready. Marked ``is_long_running=True`` so
+    ADK treats it as a fire-and-return call.
+
+    When a ``port`` is given, a ``preview_url`` is built from the *synchronous*
+    ``sandbox.get_host(port)`` (a bare host, e.g. ``<port>-<id>.e2b.app``). The
+    URL is purely syntactic — the service may not be listening yet — so
+    ``readiness`` is reported as ``"unknown"``. With no ``port`` there is no
+    preview URL (``preview_url`` is ``None``). Only a failure to *start* the
+    command yields ``success: False``; v1 does not detect an immediate exit.
+    """
+
+    def __init__(self, manager: SandboxManager) -> None:
+        super().__init__(
+            name="start_background_command",
+            description=(
+                "Start a long-running command (such as a web/dev server) inside "
+                "an isolated E2B sandbox and return immediately with its process "
+                "id. Provide a port to also get a preview URL for the exposed "
+                "service; the URL is syntactic and readiness is not verified."
+            ),
+            is_long_running=True,
+        )
+        self.manager = manager
+
+    def _get_declaration(self) -> types.FunctionDeclaration:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "command": types.Schema(
+                        type=types.Type.STRING,
+                        description="The command to start in the background.",
+                    ),
+                    "port": types.Schema(
+                        type=types.Type.INTEGER,
+                        description=(
+                            "Optional port the command exposes; when given, a "
+                            "preview URL for that port is returned."
+                        ),
+                    ),
+                    "cwd": types.Schema(
+                        type=types.Type.STRING,
+                        description="Optional working directory for the command.",
+                    ),
+                    "envs": types.Schema(
+                        type=types.Type.OBJECT,
+                        description="Optional environment variables for the command.",
+                    ),
+                },
+                required=["command"],
+            ),
+        )
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> dict[str, Any]:
+        command: str = args["command"]
+        port: int | None = args.get("port")
+        cwd: str | None = args.get("cwd")
+        envs: dict[str, str] | None = args.get("envs")
+
+        try:
+            sandbox = await self.manager.get()
+        except Exception as exc:  # noqa: BLE001 — never raise out of run_async
+            logger.debug("start_background_command: sandbox unavailable: %s", exc)
+            return failure_result(f"Sandbox unavailable: {exc}", command=command)
+
+        try:
+            handle = await sandbox.commands.run(
+                command, background=True, cwd=cwd, envs=envs
+            )
+        except Exception as exc:  # noqa: BLE001 — start failure → success:false
+            logger.debug("start_background_command: could not start: %s", exc)
+            return failure_result(f"Failed to start command: {exc}", command=command)
+
+        # No port → no preview URL. get_host is synchronous (no await).
+        if port is None:
+            return success_result(command=command, pid=handle.pid, preview_url=None)
+
+        host = sandbox.get_host(port)
+        return success_result(
+            command=command,
+            pid=handle.pid,
+            preview_url=f"https://{host}",
+            readiness="unknown",
         )

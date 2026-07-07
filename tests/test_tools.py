@@ -10,11 +10,19 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from e2b_code_interpreter import CommandExitException
+from e2b_code_interpreter import CommandExitException, FileType
 
 from e2b_adk._results import DEFAULT_MAX_OUTPUT_BYTES
 from e2b_adk._sandbox import SandboxManager
-from e2b_adk.tools import SUPPORTED_LANGUAGES, RunCode, RunCommand
+from e2b_adk.tools import (
+    SUPPORTED_LANGUAGES,
+    ListFiles,
+    ReadFile,
+    RunCode,
+    RunCommand,
+    StartBackgroundCommand,
+    WriteFile,
+)
 
 
 def _execution(
@@ -219,3 +227,245 @@ async def test_run_command_failure_paths(mock_sandbox: MagicMock) -> None:
     assert timed_out["success"] is False
     assert "timeout" in timed_out["error"].lower()
     assert "partial_output" in timed_out
+
+
+# --------------------------------------------------------------------------- #
+# file-tool helpers
+# --------------------------------------------------------------------------- #
+
+
+def _make_write_file(mock_sandbox: MagicMock) -> WriteFile:
+    manager = SandboxManager()
+    manager._sandbox = mock_sandbox
+    return WriteFile(manager)
+
+
+def _make_read_file(mock_sandbox: MagicMock) -> ReadFile:
+    manager = SandboxManager()
+    manager._sandbox = mock_sandbox
+    return ReadFile(manager)
+
+
+def _make_list_files(mock_sandbox: MagicMock) -> ListFiles:
+    manager = SandboxManager()
+    manager._sandbox = mock_sandbox
+    return ListFiles(manager)
+
+
+def _make_background(mock_sandbox: MagicMock) -> StartBackgroundCommand:
+    manager = SandboxManager()
+    manager._sandbox = mock_sandbox
+    return StartBackgroundCommand(manager)
+
+
+# --------------------------------------------------------------------------- #
+# write_file + read_file
+# --------------------------------------------------------------------------- #
+
+
+async def test_write_then_read_roundtrip(mock_sandbox: MagicMock) -> None:
+    # A tiny in-memory FS backs the mocked write/read so the roundtrip is real.
+    store: dict[str, str] = {}
+    mock_sandbox.files = MagicMock()
+
+    async def _write(path: str, data: str) -> object:
+        store[path] = data
+        return SimpleNamespace(path=path, name=path)
+
+    async def _read(path: str) -> str:
+        return store[path]
+
+    mock_sandbox.files.write = AsyncMock(side_effect=_write)
+    mock_sandbox.files.read = AsyncMock(side_effect=_read)
+
+    write_tool = _make_write_file(mock_sandbox)
+    read_tool = _make_read_file(mock_sandbox)
+
+    write_result = await write_tool.run_async(
+        args={"path": "/tmp/note.txt", "content": "hello"}, tool_context=None
+    )
+    assert write_result["success"] is True
+    assert write_result["path"] == "/tmp/note.txt"
+
+    read_result = await read_tool.run_async(
+        args={"path": "/tmp/note.txt"}, tool_context=None
+    )
+    assert read_result["success"] is True
+    assert read_result["path"] == "/tmp/note.txt"
+    assert read_result["content"] == "hello"
+
+
+async def test_read_missing_file(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.read = AsyncMock(
+        side_effect=FileNotFoundError("path not found: /nope.txt")
+    )
+    tool = _make_read_file(mock_sandbox)
+
+    result = await tool.run_async(args={"path": "/nope.txt"}, tool_context=None)
+
+    assert result["success"] is False
+    assert "not found" in result["error"].lower()
+    assert result["path"] == "/nope.txt"
+    assert isinstance(result, dict)  # never raised
+
+
+async def test_write_bad_path(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.write = AsyncMock(
+        side_effect=PermissionError("permission denied: /root/x")
+    )
+    tool = _make_write_file(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"path": "/root/x", "content": "data"}, tool_context=None
+    )
+
+    assert result["success"] is False
+    assert "permission denied" in result["error"].lower()
+    assert result["path"] == "/root/x"
+
+
+async def test_read_truncates(mock_sandbox: MagicMock) -> None:
+    big = "y" * (DEFAULT_MAX_OUTPUT_BYTES + 5_000)
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.read = AsyncMock(return_value=big)
+    tool = _make_read_file(mock_sandbox)
+
+    result = await tool.run_async(args={"path": "/big.txt"}, tool_context=None)
+
+    assert result["success"] is True
+    assert "…[truncated" in result["content"]
+    assert len(result["content"].encode("utf-8")) < len(big.encode("utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+# list_files
+# --------------------------------------------------------------------------- #
+
+
+async def test_list_files_entries(mock_sandbox: MagicMock) -> None:
+    entries = [
+        SimpleNamespace(name="app.py", type=FileType.FILE),
+        SimpleNamespace(name="src", type=FileType.DIR),
+    ]
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.list = AsyncMock(return_value=entries)
+    tool = _make_list_files(mock_sandbox)
+
+    result = await tool.run_async(args={"path": "/proj"}, tool_context=None)
+
+    assert result["success"] is True
+    assert result["path"] == "/proj"
+    assert result["entries"] == [
+        {"name": "app.py", "type": "file"},
+        {"name": "src", "type": "dir"},
+    ]
+
+
+async def test_list_files_type_mapping(mock_sandbox: MagicMock) -> None:
+    # FileType enum members AND a None type must all normalize to strings.
+    entries = [
+        SimpleNamespace(name="f", type=FileType.FILE),
+        SimpleNamespace(name="d", type=FileType.DIR),
+        SimpleNamespace(name="mystery", type=None),
+    ]
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.list = AsyncMock(return_value=entries)
+    tool = _make_list_files(mock_sandbox)
+
+    result = await tool.run_async(args={"path": "."}, tool_context=None)
+
+    types = {e["name"]: e["type"] for e in result["entries"]}
+    assert types["f"] == "file"
+    assert types["d"] == "dir"
+    assert types["mystery"] == "unknown"
+    assert all(isinstance(e["type"], str) for e in result["entries"])
+
+
+async def test_list_files_default_path(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.list = AsyncMock(return_value=[])
+    tool = _make_list_files(mock_sandbox)
+
+    result = await tool.run_async(args={}, tool_context=None)
+
+    assert result["success"] is True
+    assert result["path"] == "."
+    assert mock_sandbox.files.list.await_args.args[0] == "."
+
+
+async def test_list_missing_dir(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.files = MagicMock()
+    mock_sandbox.files.list = AsyncMock(
+        side_effect=FileNotFoundError("directory does not exist: /nope")
+    )
+    tool = _make_list_files(mock_sandbox)
+
+    result = await tool.run_async(args={"path": "/nope"}, tool_context=None)
+
+    assert result["success"] is False
+    assert result["path"] == "/nope"
+    assert isinstance(result, dict)  # never raised
+
+
+# --------------------------------------------------------------------------- #
+# start_background_command
+# --------------------------------------------------------------------------- #
+
+
+async def test_background_with_port(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.commands = MagicMock()
+    mock_sandbox.commands.run = AsyncMock(return_value=SimpleNamespace(pid=4321))
+    mock_sandbox.get_host = MagicMock(return_value="3000-sbx_test_123.e2b.app")
+    tool = _make_background(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"command": "python -m http.server 3000", "port": 3000},
+        tool_context=None,
+    )
+
+    assert result["success"] is True
+    assert result["pid"] == 4321
+    assert result["preview_url"] == "https://3000-sbx_test_123.e2b.app"
+    assert result["readiness"] == "unknown"
+    # get_host is synchronous (called, not awaited) and background=True was set.
+    mock_sandbox.get_host.assert_called_once_with(3000)
+    assert mock_sandbox.commands.run.await_args.kwargs["background"] is True
+
+
+async def test_background_without_port(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.commands = MagicMock()
+    mock_sandbox.commands.run = AsyncMock(return_value=SimpleNamespace(pid=99))
+    mock_sandbox.get_host = MagicMock()
+    tool = _make_background(mock_sandbox)
+
+    result = await tool.run_async(args={"command": "sleep 100"}, tool_context=None)
+
+    assert result["success"] is True
+    assert result["pid"] == 99
+    # No port → no preview URL (explicitly None) and get_host untouched.
+    assert result.get("preview_url") is None
+    mock_sandbox.get_host.assert_not_called()
+
+
+async def test_background_start_failure(mock_sandbox: MagicMock) -> None:
+    mock_sandbox.commands = MagicMock()
+    mock_sandbox.commands.run = AsyncMock(
+        side_effect=RuntimeError("could not spawn process")
+    )
+    tool = _make_background(mock_sandbox)
+
+    result = await tool.run_async(
+        args={"command": "bad-cmd", "port": 8080}, tool_context=None
+    )
+
+    assert result["success"] is False
+    assert "could not spawn" in result["error"].lower()
+    assert result["command"] == "bad-cmd"
+    assert isinstance(result, dict)  # never raised
+
+
+def test_background_is_long_running(mock_sandbox: MagicMock) -> None:
+    tool = _make_background(mock_sandbox)
+    assert tool.is_long_running is True

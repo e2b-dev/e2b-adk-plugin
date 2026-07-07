@@ -19,7 +19,14 @@ from google.adk.plugins import BasePlugin
 from google.adk.tools import BaseTool, ToolContext
 
 from ._sandbox import SandboxManager
-from .tools import RunCode, RunCommand
+from .tools import (
+    ListFiles,
+    ReadFile,
+    RunCode,
+    RunCommand,
+    StartBackgroundCommand,
+    WriteFile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +70,14 @@ class E2BPlugin(BasePlugin):
         an ``Agent``. Each tool receives the plugin's single ``SandboxManager``
         instance, so every tool call targets the same lazily-created sandbox.
         """
-        return [RunCode(self._manager), RunCommand(self._manager)]
+        return [
+            RunCode(self._manager),
+            RunCommand(self._manager),
+            WriteFile(self._manager),
+            ReadFile(self._manager),
+            ListFiles(self._manager),
+            StartBackgroundCommand(self._manager),
+        ]
 
     async def close(self) -> None:
         """Tear down the sandbox on plugin shutdown (ADK teardown hook)."""
