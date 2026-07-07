@@ -84,6 +84,74 @@ async def test_shutdown_noop_when_never_created(
 
 
 # --------------------------------------------------------------------------- #
+# Keep-alive — refresh_timeout() pushes the expiry window forward on demand.
+# --------------------------------------------------------------------------- #
+
+
+async def test_refresh_timeout_noop_when_never_created(
+    patched_create: AsyncMock, mock_sandbox: MagicMock
+) -> None:
+    manager = SandboxManager()
+
+    # No sandbox yet — refresh must not create one and must not raise.
+    await manager.refresh_timeout()
+
+    patched_create.assert_not_called()
+
+
+async def test_refresh_timeout_uses_configured_timeout() -> None:
+    sandbox = _fresh_sandbox("keepalive")
+    sandbox.set_timeout = AsyncMock()
+    manager = SandboxManager(timeout=3600)
+    manager._sandbox = sandbox
+
+    await manager.refresh_timeout()
+
+    sandbox.set_timeout.assert_awaited_once_with(3600)
+
+
+async def test_refresh_timeout_defaults_to_sdk_timeout() -> None:
+    from e2b.sandbox.main import SandboxBase
+
+    sandbox = _fresh_sandbox("keepalive-default")
+    sandbox.set_timeout = AsyncMock()
+    manager = SandboxManager()  # no explicit timeout → SDK default applies
+    manager._sandbox = sandbox
+
+    await manager.refresh_timeout()
+
+    sandbox.set_timeout.assert_awaited_once_with(SandboxBase.default_sandbox_timeout)
+
+
+async def test_refresh_timeout_swallows_errors() -> None:
+    # Keep-alive is best-effort: a set_timeout failure must never propagate
+    # (it would otherwise break the tool call that triggered the refresh).
+    sandbox = _fresh_sandbox("keepalive-broken")
+    sandbox.set_timeout = AsyncMock(side_effect=RuntimeError("api down"))
+    manager = SandboxManager()
+    manager._sandbox = sandbox
+
+    await manager.refresh_timeout()  # must not raise
+
+    sandbox.set_timeout.assert_awaited_once()
+
+
+async def test_refresh_timeout_after_shutdown_is_noop() -> None:
+    # A refresh racing/following shutdown must neither raise nor resurrect the
+    # sandbox: after shutdown the cache is None, so refresh returns early.
+    sandbox = _fresh_sandbox("keepalive-shutdown")
+    sandbox.set_timeout = AsyncMock()
+    manager = SandboxManager()
+    manager._sandbox = sandbox
+
+    await manager.shutdown()
+    await manager.refresh_timeout()
+
+    sandbox.set_timeout.assert_not_called()
+    assert manager._sandbox is None
+
+
+# --------------------------------------------------------------------------- #
 # Concurrency — the asyncio.Lock in get()/shutdown() must serialize creation
 # so a burst of tool calls can never create (and leak) more than one sandbox.
 # --------------------------------------------------------------------------- #

@@ -98,6 +98,16 @@ class E2BPlugin(BasePlugin):
         """Tear down the sandbox on plugin shutdown (ADK teardown hook)."""
         await self._manager.shutdown()
 
+    def _owns(self, tool: BaseTool) -> bool:
+        """Whether ``tool`` is one of this plugin's own sandbox tools.
+
+        ADK dispatches plugin callbacks for *every* tool in the app, including
+        tools this plugin didn't create. Ownership is checked by identity on the
+        shared ``SandboxManager`` so foreign tools are left alone — no misleading
+        "E2B tool" log lines and no warnings about other tools' result shapes.
+        """
+        return getattr(tool, "manager", None) is self._manager
+
     async def before_tool_callback(
         self,
         *,
@@ -105,7 +115,14 @@ class E2BPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> dict[str, Any] | None:
-        """Log the tool about to run inside the sandbox (non-intrusive)."""
+        """Keep the sandbox alive and log the tool about to run (non-intrusive)."""
+        if not self._owns(tool):
+            return None
+        # Reset the sandbox's expiry window on every tool call so a busy session
+        # outlives the E2B timeout (default 300s, counted from creation or the
+        # last set_timeout — not from last use). No-op before the sandbox exists;
+        # best-effort, never breaks the call.
+        await self._manager.refresh_timeout()
         logger.debug("E2B tool starting: %s args=%s", tool.name, _redact_args(tool_args))
         return None
 
@@ -123,6 +140,8 @@ class E2BPlugin(BasePlugin):
         result contract) is surfaced at warning level; an exception that escapes
         a tool is handled separately in :meth:`on_tool_error_callback`.
         """
+        if not self._owns(tool):
+            return None
         if isinstance(result, dict) and result.get("success") is False:
             logger.warning(
                 "E2B tool %s returned a failure result: %s",
@@ -147,5 +166,7 @@ class E2BPlugin(BasePlugin):
         so reaching here indicates a bug or an unexpected SDK error worth a
         louder log line. Returns ``None`` (no result substitution).
         """
+        if not self._owns(tool):
+            return None
         logger.error("E2B tool %s raised an uncaught exception: %s", tool.name, error)
         return None

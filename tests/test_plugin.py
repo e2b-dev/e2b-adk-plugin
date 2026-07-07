@@ -78,6 +78,7 @@ async def test_after_tool_callback_warns_on_failure_result(
     plugin = E2BPlugin()
     tool = MagicMock(name="tool")
     tool.name = "run_code"
+    tool.manager = plugin._manager  # one of this plugin's own tools
 
     with caplog.at_level(logging.WARNING, logger="e2b_adk.plugin"):
         out = await plugin.after_tool_callback(
@@ -98,6 +99,7 @@ async def test_on_tool_error_callback_logs_and_returns_none(
     plugin = E2BPlugin()
     tool = MagicMock(name="tool")
     tool.name = "run_command"
+    tool.manager = plugin._manager  # one of this plugin's own tools
 
     with caplog.at_level(logging.ERROR, logger="e2b_adk.plugin"):
         out = await plugin.on_tool_error_callback(
@@ -117,6 +119,7 @@ async def test_before_tool_callback_redacts_sensitive_args(
     plugin = E2BPlugin()
     tool = MagicMock(name="tool")
     tool.name = "write_file"
+    tool.manager = plugin._manager  # one of this plugin's own tools
 
     with caplog.at_level(logging.DEBUG, logger="e2b_adk.plugin"):
         await plugin.before_tool_callback(
@@ -134,3 +137,79 @@ async def test_before_tool_callback_redacts_sensitive_args(
     assert "sk-do-not-log" not in caplog.text
     assert "<redacted>" in caplog.text
     assert "/app/main.py" in caplog.text
+
+
+async def test_callbacks_ignore_foreign_tools(caplog: LogCaptureFixture) -> None:
+    # ADK dispatches plugin callbacks for every tool in the app; tools this
+    # plugin doesn't own must produce no "E2B tool" logs or warnings.
+    plugin = E2BPlugin()
+    foreign = MagicMock(name="foreign_tool")
+    foreign.name = "someone_elses_tool"
+    foreign.manager = object()  # not this plugin's SandboxManager
+
+    # A typical ADK tool has no `manager` attribute at all (e.g. FunctionTool):
+    # the spec-limited mock raises AttributeError on .manager access, so the
+    # ownership check must treat it as foreign rather than blow up.
+    managerless = MagicMock(name="managerless_tool", spec=["name"])
+    managerless.name = "plain_function_tool"
+
+    with caplog.at_level(logging.DEBUG, logger="e2b_adk.plugin"):
+        assert (
+            await plugin.before_tool_callback(
+                tool=managerless, tool_args={}, tool_context=None
+            )
+            is None
+        )
+        assert (
+            await plugin.before_tool_callback(
+                tool=foreign, tool_args={"x": 1}, tool_context=None
+            )
+            is None
+        )
+        assert (
+            await plugin.after_tool_callback(
+                tool=foreign,
+                tool_args={},
+                tool_context=None,
+                result={"success": False, "error": "their own convention"},
+            )
+            is None
+        )
+        assert (
+            await plugin.on_tool_error_callback(
+                tool=foreign, tool_args={}, tool_context=None, error=RuntimeError("x")
+            )
+            is None
+        )
+
+    assert "E2B tool" not in caplog.text
+
+
+async def test_before_tool_callback_keeps_sandbox_alive(
+    mock_sandbox: MagicMock,
+) -> None:
+    # Every owned tool call must push the sandbox expiry window forward using
+    # the configured timeout.
+    plugin = E2BPlugin(timeout=1234)
+    mock_sandbox.set_timeout = AsyncMock()
+    plugin._manager._sandbox = mock_sandbox  # sandbox already created
+
+    tool = plugin.get_tools()[0]
+    await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=None)
+
+    mock_sandbox.set_timeout.assert_awaited_once_with(1234)
+
+
+async def test_before_tool_callback_no_sandbox_no_keepalive(
+    mock_sandbox: MagicMock,
+) -> None:
+    # Before the first tool call there is no sandbox: the keep-alive must be a
+    # no-op (and must not create one).
+    plugin = E2BPlugin()
+    mock_sandbox.set_timeout = AsyncMock()
+
+    tool = plugin.get_tools()[0]
+    await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=None)
+
+    mock_sandbox.set_timeout.assert_not_called()
+    assert plugin._manager._sandbox is None

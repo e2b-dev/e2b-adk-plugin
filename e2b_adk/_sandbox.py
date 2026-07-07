@@ -10,9 +10,13 @@ create two sandboxes and leak one.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
+from e2b.sandbox.main import SandboxBase
 from e2b_code_interpreter import AsyncSandbox
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxManager:
@@ -40,6 +44,25 @@ class SandboxManager:
                 if self._sandbox is None:
                     self._sandbox = await AsyncSandbox.create(**self._opts)
         return self._sandbox
+
+    async def refresh_timeout(self) -> None:
+        """Push the sandbox's expiry window forward (no-op when none exists).
+
+        An E2B sandbox expires ``timeout`` seconds (SDK default 300) after
+        creation or the last ``set_timeout`` call — *not* after the last use.
+        Refreshing on every tool call keeps a busy session's sandbox alive
+        indefinitely; only an idle gap longer than the timeout still expires
+        it. Best-effort: a keep-alive failure is logged and swallowed so it
+        can never break the tool call that triggered it.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        timeout: int = self._opts.get("timeout") or SandboxBase.default_sandbox_timeout
+        try:
+            await sandbox.set_timeout(timeout)
+        except Exception as exc:  # noqa: BLE001 — keep-alive is best-effort
+            logger.debug("sandbox keep-alive failed: %s", exc)
 
     async def shutdown(self) -> None:
         """Kill the sandbox if one exists and clear the cache.
