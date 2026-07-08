@@ -18,7 +18,6 @@ from e2b_code_interpreter import AsyncSandbox
 
 logger = logging.getLogger(__name__)
 
-
 class SandboxManager:
     """Lazily creates and caches one ``AsyncSandbox``.
 
@@ -38,6 +37,11 @@ class SandboxManager:
         Subsequent calls return the cached instance without creating a second
         sandbox. Creation is guarded by a lock with a double-check so that two
         concurrent first calls create exactly one sandbox, never two.
+
+        The cached handle is returned as-is without a liveness check: an
+        already-created sandbox that has since expired is not detected or
+        re-created here (see :meth:`refresh_timeout` for the keep-alive that
+        prevents expiry during active use).
         """
         if self._sandbox is None:
             async with self._lock:

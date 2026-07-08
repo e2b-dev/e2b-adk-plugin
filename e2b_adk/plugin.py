@@ -63,20 +63,56 @@ class E2BPlugin(BasePlugin):
         metadata: dict[str, str] | None = None,
         envs: dict[str, str] | None = None,
         timeout: int | None = None,
+        secure: bool | None = None,
+        allow_internet_access: bool | None = None,
+        mcp: Any | None = None,
+        network: Any | None = None,
+        lifecycle: Any | None = None,
+        volume_mounts: Any | None = None,
         plugin_name: str = "e2b_plugin",
+        **opts: Any,
     ) -> None:
+        """Build the plugin and its (lazy) ``SandboxManager``.
+
+        Every option except ``plugin_name`` maps to an ``AsyncSandbox.create``
+        parameter and is forwarded verbatim; only options the caller actually
+        set (non-``None``) are passed, so E2B's own defaults apply otherwise.
+
+        The named parameters cover ``create``'s sandbox options. Any further
+        keyword arguments (``**opts``) are forwarded verbatim too, covering the
+        connection-level ``ApiParams`` (``proxy``, ``request_timeout``,
+        ``headers``, ...) and any future ``create`` parameter without a plugin
+        change — the plugin stays a thin, neutral passthrough.
+
+        ``api_key`` is optional and normally omitted: when it is ``None`` the
+        E2B SDK reads ``E2B_API_KEY`` from the environment automatically, which
+        is the recommended way to supply the credential (keep it out of source).
+
+        ``lifecycle`` controls what happens when the sandbox times out. Omitting
+        it keeps E2B's default (``on_timeout: "kill"``); pass e.g.
+        ``{"on_timeout": {"action": "pause"}, "auto_resume": True}`` to preserve
+        state across idle gaps instead.
+        """
         super().__init__(name=plugin_name)
 
-        opts: dict[str, Any] = {
+        named: dict[str, Any] = {
             "api_key": api_key,
             "template": template,
             "metadata": metadata,
             "envs": envs,
             "timeout": timeout,
+            "secure": secure,
+            "allow_internet_access": allow_internet_access,
+            "mcp": mcp,
+            "network": network,
+            "lifecycle": lifecycle,
+            "volume_mounts": volume_mounts,
         }
-        # Forward only the options the caller actually set.
-        opts = {key: value for key, value in opts.items() if value is not None}
-        self._manager = SandboxManager(**opts)
+        # Forward only the named options the caller actually set, plus any extra
+        # keyword args verbatim (e.g. connection-level ApiParams).
+        forwarded = {key: value for key, value in named.items() if value is not None}
+        forwarded.update(opts)
+        self._manager = SandboxManager(**forwarded)
 
     def get_tools(self) -> list[BaseTool]:
         """Return the execution tools, all sharing this plugin's sandbox.

@@ -554,6 +554,15 @@ class StartBackgroundCommand(BaseTool):
                         type=types.Type.OBJECT,
                         description="Optional environment variables for the command.",
                     ),
+                    "timeout": types.Schema(
+                        type=types.Type.INTEGER,
+                        description=(
+                            "Optional max lifetime in seconds for the background "
+                            "process before the sandbox stops it (E2B default is "
+                            "60s). Pass a larger value for a long-lived server, or "
+                            "0 to disable the timeout."
+                        ),
+                    ),
                 },
                 required=["command"],
             ),
@@ -568,6 +577,7 @@ class StartBackgroundCommand(BaseTool):
         port: int | None = args.get("port")
         cwd: str | None = args.get("cwd")
         envs: dict[str, str] | None = args.get("envs")
+        timeout: int | None = args.get("timeout")
 
         try:
             sandbox = await self.manager.get()
@@ -575,10 +585,12 @@ class StartBackgroundCommand(BaseTool):
             logger.debug("start_background_command: sandbox unavailable: %s", exc)
             return failure_result(f"Sandbox unavailable: {exc}", command=command)
 
+        run_kwargs: dict[str, Any] = {"background": True, "cwd": cwd, "envs": envs}
+        if timeout is not None:
+            run_kwargs["timeout"] = timeout
+
         try:
-            handle = await sandbox.commands.run(
-                command, background=True, cwd=cwd, envs=envs
-            )
+            handle = await sandbox.commands.run(command, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 — start failure → success:false
             logger.debug("start_background_command: could not start: %s", exc)
             return failure_result(f"Failed to start command: {exc}", command=command)

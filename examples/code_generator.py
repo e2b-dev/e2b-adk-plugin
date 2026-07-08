@@ -40,6 +40,9 @@ ONLY the final function. Never return code you haven't executed."""
 
 
 async def main() -> None:
+    # The sandbox uses E2B's default lifecycle (killed on timeout). To keep the
+    # kernel and files alive across idle gaps instead, pass e.g.
+    # ``lifecycle={"on_timeout": {"action": "pause"}, "auto_resume": True}``.
     plugin = E2BPlugin(metadata={"example": "code-generator"})
     agent = Agent(
         model="gemini-2.5-flash",

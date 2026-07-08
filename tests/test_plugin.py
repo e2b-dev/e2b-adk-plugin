@@ -6,9 +6,12 @@ construction time, and ``close()`` delegates teardown to its ``SandboxManager``.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from e2b.connection_config import ApiParams
+from e2b_code_interpreter import AsyncSandbox
 from pytest import LogCaptureFixture
 
 from e2b_adk import E2BPlugin
@@ -46,6 +49,77 @@ def test_get_tools_returns_six_shared(patched_create: AsyncMock) -> None:
 
     # Still no sandbox created.
     patched_create.assert_not_called()
+
+
+def test_forwarded_opts_accepted_by_sdk_create() -> None:
+    # SDK-drift guard. Every option the plugin forwards must be either a named
+    # AsyncSandbox.create parameter or a declared ApiParams key (create's
+    # `**opts: Unpack[ApiParams]` channel — where api_key lives).
+    #
+    # We deliberately do NOT accept "create has **kwargs" as sufficient: at
+    # runtime `**opts` silently swallows any keyword, so if E2B renamed a param
+    # (e.g. `lifecycle` -> `sandbox_lifecycle`) our forwarded key would be
+    # accepted-and-ignored rather than raising. Validating against the *named
+    # params + the ApiParams TypedDict* is the real contract and catches that
+    # rename statically. Construction is lazy, so no sandbox is created.
+    plugin = E2BPlugin(
+        api_key="k",
+        template="t",
+        metadata={"a": "b"},
+        envs={"E": "1"},
+        timeout=30,
+        secure=True,
+        allow_internet_access=True,
+        mcp={},
+        network={},
+        lifecycle={"on_timeout": "kill"},
+        volume_mounts={},
+    )
+
+    params = inspect.signature(AsyncSandbox.create).parameters
+    named = {
+        name
+        for name, p in params.items()
+        if p.kind is not inspect.Parameter.VAR_KEYWORD and name != "cls"
+    }
+    api_params_keys = set(ApiParams.__annotations__)
+    allowed = named | api_params_keys
+
+    forwarded = set(plugin._manager._opts)
+    # Every non-None constructor option must have reached the manager.
+    assert forwarded == {
+        "api_key",
+        "template",
+        "metadata",
+        "envs",
+        "timeout",
+        "secure",
+        "allow_internet_access",
+        "mcp",
+        "network",
+        "lifecycle",
+        "volume_mounts",
+    }
+    unknown = forwarded - allowed
+    assert not unknown, f"create() no longer accepts forwarded opt(s): {unknown}"
+    # api_key specifically must remain an ApiParams member, not just tolerated.
+    assert "api_key" in api_params_keys
+
+
+def test_extra_kwargs_forwarded_verbatim() -> None:
+    # The **opts catch-all lets connection-level ApiParams (and any future
+    # create() param) through without a plugin change — e.g. proxy / request
+    # timeout for enterprise/self-hosted setups. Construction stays lazy.
+    plugin = E2BPlugin(
+        template="t",
+        proxy="http://proxy.internal:8080",
+        request_timeout=30.0,
+    )
+
+    opts = plugin._manager._opts
+    assert opts["proxy"] == "http://proxy.internal:8080"
+    assert opts["request_timeout"] == 30.0
+    assert opts["template"] == "t"
 
 
 async def test_close_shuts_down(patched_create: AsyncMock, mock_sandbox: MagicMock) -> None:
