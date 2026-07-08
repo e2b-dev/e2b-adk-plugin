@@ -66,3 +66,7 @@ implicit_reexport = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: hits real E2B/Gemini APIs (billable); excluded by default — run with `pytest -m live`",
+]
