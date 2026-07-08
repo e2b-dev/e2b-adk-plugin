@@ -195,8 +195,11 @@ async def test_before_tool_callback_keeps_sandbox_alive(
     plugin._manager._sandbox = mock_sandbox  # sandbox already created
 
     tool = plugin.get_tools()[0]
-    await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=None)
+    out = await plugin.before_tool_callback(tool=tool, tool_args={}, tool_context=None)
 
+    # Must return None: a non-None return would make ADK treat it as the tool
+    # result and skip running the tool entirely.
+    assert out is None
     mock_sandbox.set_timeout.assert_awaited_once_with(1234)
 
 
