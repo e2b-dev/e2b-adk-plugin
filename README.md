@@ -128,7 +128,7 @@ uv run --extra examples python examples/data_analysis.py
   Rich results (charts, dataframes, images) are not surfaced yet.
 - **Lazy, shared sandbox lifecycle.** The sandbox is created on the first tool
   call and reused for the agent's lifetime, then killed when the runner exits.
-- **Bounded output.** Large output is truncated with a `[truncated N bytes]`
+- **Bounded output.** Large output is truncated with a `…[truncated N bytes]`
   marker so a single call can't flood the model's context.
 
 ## License
