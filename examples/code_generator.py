@@ -42,7 +42,7 @@ ONLY the final function. Never return code you haven't executed."""
 async def main() -> None:
     plugin = E2BPlugin(metadata={"example": "code-generator"})
     agent = Agent(
-        model="gemini-2.5-pro",
+        model="gemini-2.5-flash",
         name="codegen",
         instruction=INSTRUCTION,
         tools=plugin.get_tools(),
