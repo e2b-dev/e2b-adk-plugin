@@ -153,6 +153,61 @@ async def test_all_tools_against_live_sandbox() -> None:
         await plugin.close()
 
 
+async def test_error_paths_against_live_sandbox() -> None:
+    """Failure paths against real E2B — verifies the error mapping our unit
+    tests could only assume (real SDK exception types, real timeout)."""
+    plugin = E2BPlugin(metadata={"purpose": "smoke-test-errors"})
+    tools = _by_name(plugin)
+    try:
+        # write_file: procfs rejects file creation regardless of user →
+        # failure result echoing the path, never an exception
+        result = await tools["write_file"].run_async(
+            args={"path": "/proc/forbidden.txt", "content": "x"}, tool_context=None
+        )
+        assert result["success"] is False, result
+        assert result["path"] == "/proc/forbidden.txt"
+
+        # list_files: missing directory → failure result echoing the path
+        result = await tools["list_files"].run_async(
+            args={"path": "/definitely/missing/dir"}, tool_context=None
+        )
+        assert result["success"] is False, result
+        assert result["path"] == "/definitely/missing/dir"
+
+        # run_command: real timeout → failure result with partial_output key
+        result = await tools["run_command"].run_async(
+            args={"command": "sleep 10", "timeout": 2}, tool_context=None
+        )
+        assert result["success"] is False, result
+        assert "partial_output" in result
+
+        # run_code: oversized real output is truncated with the marker
+        result = await tools["run_code"].run_async(
+            args={"code": "print('x' * 20000)"}, tool_context=None
+        )
+        assert result["success"] is True, result
+        assert "…[truncated" in result["stdout"]
+
+        # run_code: a non-python language accepted by real E2B
+        result = await tools["run_code"].run_async(
+            args={"code": "echo live-bash", "language": "bash"}, tool_context=None
+        )
+        assert result["success"] is True, result
+        assert "live-bash" in result["stdout"]
+
+        # start_background_command: a nonexistent binary must not raise.
+        # Immediate-exit detection is out of scope, so either outcome
+        # (spawned-then-died or failed-to-spawn) is acceptable — the contract
+        # is a dict result, never an exception.
+        result = await tools["start_background_command"].run_async(
+            args={"command": "definitely-not-a-binary-xyz"}, tool_context=None
+        )
+        assert isinstance(result, dict)
+        assert "success" in result
+    finally:
+        await plugin.close()
+
+
 @pytest.mark.skipif(
     not os.environ.get("GOOGLE_API_KEY"), reason="GOOGLE_API_KEY not set"
 )
