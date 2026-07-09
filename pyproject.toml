@@ -46,6 +46,18 @@ examples = [
 [tool.hatch.build.targets.wheel]
 packages = ["e2b_adk"]
 
+# Explicit allowlist: a local build must never leak untracked working-tree
+# files (hatchling's default sdist selection excludes only gitignored paths).
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "e2b_adk",
+    "tests",
+    "examples",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
