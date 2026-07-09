@@ -13,7 +13,6 @@ import asyncio
 import logging
 from typing import Any
 
-from e2b.sandbox.main import SandboxBase
 from e2b_code_interpreter import AsyncSandbox
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ class SandboxManager:
         sandbox = self._sandbox
         if sandbox is None:
             return
-        timeout: int = self._opts.get("timeout") or SandboxBase.default_sandbox_timeout
+        timeout: int = self._opts.get("timeout") or AsyncSandbox.default_sandbox_timeout
         try:
             await sandbox.set_timeout(timeout)
         except Exception as exc:  # noqa: BLE001 — keep-alive is best-effort

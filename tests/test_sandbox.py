@@ -111,7 +111,7 @@ async def test_refresh_timeout_uses_configured_timeout() -> None:
 
 
 async def test_refresh_timeout_defaults_to_sdk_timeout() -> None:
-    from e2b.sandbox.main import SandboxBase
+    from e2b_code_interpreter import AsyncSandbox
 
     sandbox = _fresh_sandbox("keepalive-default")
     sandbox.set_timeout = AsyncMock()
@@ -120,7 +120,7 @@ async def test_refresh_timeout_defaults_to_sdk_timeout() -> None:
 
     await manager.refresh_timeout()
 
-    sandbox.set_timeout.assert_awaited_once_with(SandboxBase.default_sandbox_timeout)
+    sandbox.set_timeout.assert_awaited_once_with(AsyncSandbox.default_sandbox_timeout)
 
 
 async def test_refresh_timeout_swallows_errors() -> None:
