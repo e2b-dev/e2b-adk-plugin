@@ -1,0 +1,265 @@
+---
+title: "Google ADK"
+description: "Give Google ADK agents a secure E2B sandbox to run code, commands, and files in."
+icon: "/images/icons/google-adk.svg"
+---
+
+[Google ADK](https://google.github.io/adk-docs/) (Agent Development Kit) is
+Google's framework for building agents, with Gemini as the default model. The
+[`e2b-adk`](https://github.com/e2b-dev/e2b-adk-plugin) plugin adds a set of tools
+your agent can call to generate and run code, execute shell commands, and manage
+files — each backed by the [E2B Code Interpreter](/docs) running in an isolated
+sandbox. The model's code executes in a real Python kernel instead of being
+trusted blind.
+
+To use E2B with ADK:
+
+1. Create an `E2BPlugin`.
+2. Hand `plugin.get_tools()` to your `Agent` and register the plugin on the `App`.
+3. Run the agent — every tool call executes inside the sandbox, and the plugin
+   creates and tears the sandbox down for you.
+
+## Install the dependencies
+
+Install the plugin. It pulls in Google ADK and the E2B Code Interpreter SDK.
+
+```bash
+pip install e2b-adk
+```
+
+You need an E2B API key for the sandbox and a Gemini key for the model.
+
+```bash
+export E2B_API_KEY="..."
+export GOOGLE_API_KEY="..."
+```
+
+<Note>
+  The examples below use `gemini-2.5-flash`, which runs on a free Gemini key.
+  Swap to `gemini-2.5-pro` for stronger reasoning — it requires a paid tier
+  (a free key returns HTTP 429).
+</Note>
+
+## Data analysis agent
+
+A good fit for a sandbox is analysis the model shouldn't do in its head. Here the
+agent is given a raw dataset and a question. Rather than eyeballing the numbers,
+it writes the data to a file, runs real pandas against it, and reports figures it
+actually computed — the sandbox is a calculator it can't fool.
+
+### Create the plugin and agent
+
+The plugin owns the sandbox. Pass its tools to the `Agent` and register it on the
+`App`; the instruction is what makes the agent *run* code rather than guess.
+
+```python
+from google.adk.agents import Agent
+from google.adk.apps import App
+
+from e2b_adk import E2BPlugin
+
+INSTRUCTION = """You are a data analyst. You never guess numbers — you compute
+them. Save any data you are given to a file with write_file, analyse it by
+running real pandas with run_code, fix and re-run if the code errors, and report
+the figures you computed. Never report a number you have not verified by running
+code."""
+
+plugin = E2BPlugin()
+agent = Agent(
+    model="gemini-2.5-flash",
+    name="data_analyst",
+    instruction=INSTRUCTION,
+    tools=plugin.get_tools(),
+)
+app = App(name="data_analysis", root_agent=agent, plugins=[plugin])
+```
+
+### Run the analysis
+
+Run the agent inside an `InMemoryRunner`. The sandbox is created lazily on the
+first tool call, kept alive while the agent works, and killed when the
+`async with` block exits — you never manage it yourself.
+
+```python
+from google.adk.runners import InMemoryRunner
+
+DATASET = """month,region,marketing_spend,revenue
+2024-01,North,12000,48000
+2024-02,North,15000,61000
+2024-03,North,9000,37000
+2024-04,North,18000,72000
+2024-01,South,8000,26000
+2024-02,South,11000,30000
+2024-03,South,14000,33000
+2024-04,South,17000,38000"""
+
+async with InMemoryRunner(app=app) as runner:
+    # run_debug prints the conversation as it runs.
+    await runner.run_debug(
+        f"Here is marketing spend and revenue as CSV:\n\n{DATASET}\n\n"
+        "Save it to sales.csv, then tell me which region converts spend into "
+        "revenue more efficiently and which month performed best."
+    )
+```
+
+The agent writes `sales.csv` with `write_file`, then uses `run_code` to load it
+with pandas, compute revenue-per-dollar and per-month totals, and answer in
+prose — every number backed by an execution in the sandbox:
+
+```text
+data_analyst > North converts marketing spend into revenue more efficiently —
+about $4.0 of revenue per $1 of spend versus roughly $2.5 for South. The best
+single month was 2024-04 in North: $72,000 revenue from $18,000 spend.
+```
+
+Pass `verbose=True` to `run_debug` to also print each tool call and its result
+as the agent works.
+
+### Full example
+
+```python expandable
+import asyncio
+
+from google.adk.agents import Agent
+from google.adk.apps import App
+from google.adk.runners import InMemoryRunner
+
+from e2b_adk import E2BPlugin
+
+INSTRUCTION = """You are a data analyst. You never guess numbers — you compute
+them. Save any data you are given to a file with write_file, analyse it by
+running real pandas with run_code, fix and re-run if the code errors, and report
+the figures you computed. Never report a number you have not verified by running
+code."""
+
+DATASET = """month,region,marketing_spend,revenue
+2024-01,North,12000,48000
+2024-02,North,15000,61000
+2024-03,North,9000,37000
+2024-04,North,18000,72000
+2024-01,South,8000,26000
+2024-02,South,11000,30000
+2024-03,South,14000,33000
+2024-04,South,17000,38000"""
+
+
+async def main() -> None:
+    plugin = E2BPlugin(metadata={"example": "data-analysis"})
+    agent = Agent(
+        model="gemini-2.5-flash",
+        name="data_analyst",
+        instruction=INSTRUCTION,
+        tools=plugin.get_tools(),
+    )
+    app = App(name="data_analysis", root_agent=agent, plugins=[plugin])
+
+    async with InMemoryRunner(app=app) as runner:
+        # run_debug prints the conversation as it runs.
+        await runner.run_debug(
+            f"Here is marketing spend and revenue as CSV:\n\n{DATASET}\n\n"
+            "Save it to sales.csv, then tell me which region converts spend "
+            "into revenue more efficiently and which month performed best."
+        )
+
+
+asyncio.run(main())
+```
+
+## Code generation agent
+
+The same tools support a code generator that verifies its own work. The
+instruction tells the agent to execute every snippet in the sandbox before
+returning it, so what you get back has already run and passed its tests — no
+untested code reaches the user.
+
+### Full example
+
+```python expandable
+import asyncio
+
+from google.adk.agents import Agent
+from google.adk.apps import App
+from google.adk.runners import InMemoryRunner
+
+from e2b_adk import E2BPlugin
+
+INSTRUCTION = """You are a code generator that returns verified, working code.
+For every request: (1) write the function, (2) write tests, (3) EXECUTE in the
+sandbox with run_code, (4) if it fails, fix and re-run until tests pass,
+(5) return ONLY the final function. Never return code you haven't executed."""
+
+
+async def main() -> None:
+    plugin = E2BPlugin(metadata={"example": "code-generator"})
+    agent = Agent(
+        model="gemini-2.5-flash",
+        name="codegen",
+        instruction=INSTRUCTION,
+        tools=plugin.get_tools(),
+    )
+    app = App(name="codegen", root_agent=agent, plugins=[plugin])
+
+    async with InMemoryRunner(app=app) as runner:
+        # run_debug prints the conversation as it runs.
+        await runner.run_debug(
+            "Write a Python function group_by(items, key) that groups a list "
+            "by a key function."
+        )
+
+
+asyncio.run(main())
+```
+
+## Tools
+
+`plugin.get_tools()` returns six tools, all sharing the plugin's single sandbox
+so state persists across calls. Each returns a dict with a `success` flag and
+reports failures in the result rather than raising, so a bad call never aborts
+the agent run.
+
+| Tool | Does |
+|------|------|
+| `run_code` | Run code in a stateful kernel (variables persist across calls) |
+| `run_command` | Run a shell command |
+| `write_file` / `read_file` | Write and read files in the sandbox |
+| `list_files` | List a directory |
+| `start_background_command` | Start a long-running process, with an optional preview URL for a port |
+
+## Configuration
+
+`E2BPlugin` accepts keyword-only options, all optional. Anything you don't set
+falls back to the E2B SDK's own default — the plugin overrides none of them.
+
+```python
+plugin = E2BPlugin(
+    api_key=None,    # defaults to the E2B_API_KEY env var
+    template=None,   # E2B sandbox template
+    metadata=None,   # dict[str, str] attached to the sandbox
+    envs=None,       # environment variables inside the sandbox
+    timeout=None,    # sandbox timeout in seconds (re-applied on every tool call)
+    lifecycle=None,  # what happens on timeout — see below
+    # ...every other AsyncSandbox.create() option is forwarded verbatim
+)
+```
+
+The plugin keeps the sandbox alive while the agent is working: every tool call
+pushes the expiry window forward by `timeout` (E2B's default is 300s). An idle
+gap longer than `timeout` still expires the sandbox under E2B's default
+lifecycle — pass
+`lifecycle={"on_timeout": {"action": "pause"}, "auto_resume": True}` to pause
+and auto-resume across idle gaps instead. See the
+[repository README](https://github.com/e2b-dev/e2b-adk-plugin#configuration)
+for the full option list.
+
+## Reference examples
+
+Complete, runnable scripts live in the plugin repository.
+
+<CardGroup cols={2}>
+  <Card title="Data analysis agent" icon="chart-line" href="https://github.com/e2b-dev/e2b-adk-plugin/blob/main/examples/data_analysis.py">
+    Compute real answers from a dataset with pandas in the sandbox
+  </Card>
+  <Card title="Code generator" icon="code" href="https://github.com/e2b-dev/e2b-adk-plugin/blob/main/examples/code_generator.py">
+    Return only code that has been executed and tested
+  </Card>
+</CardGroup>
