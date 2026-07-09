@@ -61,8 +61,8 @@ async def main() -> None:
     app = App(name="demo", root_agent=agent, plugins=[plugin])
 
     async with InMemoryRunner(app=app) as runner:
-        result = await runner.run_debug("Compute the 20th Fibonacci number.")
-        print(result)
+        # run_debug prints the conversation as it runs.
+        await runner.run_debug("Compute the 20th Fibonacci number.")
 
 
 asyncio.run(main())
@@ -89,12 +89,12 @@ so a bad call never aborts the agent run.
 | `write_file` | Write a file in the sandbox | `path` |
 | `read_file` | Read a file back | `path`, `content` |
 | `list_files` | List a directory | `entries` (`[{name, type}]`) |
-| `start_background_command` | Start a long-running process; optional preview URL for a port | `pid`, `preview_url`, `readiness` |
+| `start_background_command` | Start a long-running process; optional preview URL for a port | `pid`, `preview_url` (+ `readiness` when `port` is set) |
 
 ### Configuration
 
 `E2BPlugin` takes keyword-only options, all optional. Anything you don't set
-falls back to the E2B SDK's own default — the plugin adds no opinion of its own.
+falls back to the E2B SDK's own default — the plugin overrides none of them.
 
 ```python
 E2BPlugin(
@@ -103,7 +103,7 @@ E2BPlugin(
     template=None,              # E2B sandbox template
     metadata=None,              # dict[str, str] attached to the sandbox
     envs=None,                  # dict[str, str] environment variables
-    timeout=None,               # sandbox timeout in seconds
+    timeout=None,               # sandbox timeout in seconds (re-applied on every tool call)
     plugin_name="e2b_plugin",
     # Passed straight through to AsyncSandbox.create() — see the E2B SDK docs
     secure=None,
@@ -138,6 +138,13 @@ uv run --extra examples python examples/data_analysis.py
   Rich results (charts, dataframes, images) are not surfaced yet.
 - **Lazy, shared sandbox lifecycle.** The sandbox is created on the first tool
   call and reused for the agent's lifetime, then killed when the runner exits.
+- **Keep-alive while active, expiry when idle.** Every tool call pushes the
+  sandbox's expiry window forward by `timeout` (E2B's default is 300s), so an
+  active session never expires mid-run. An idle gap longer than `timeout` still
+  expires the sandbox under E2B's default lifecycle (`on_timeout: kill`), and
+  later tool calls return failure results — pass e.g.
+  `lifecycle={"on_timeout": {"action": "pause"}, "auto_resume": True}` to pause
+  and auto-resume across idle gaps instead.
 - **Bounded output.** Large output is truncated with a `…[truncated N bytes]`
   marker so a single call can't flood the model's context.
 

@@ -52,11 +52,11 @@ async def main() -> None:
     )
     app = App(name="codegen_app", root_agent=agent, plugins=[plugin])
     async with InMemoryRunner(app=app) as runner:
-        resp = await runner.run_debug(
+        # run_debug prints the conversation as it runs.
+        await runner.run_debug(
             "Write a Python function group_by(items, key) that groups a list "
             "by a key function."
         )
-        print(resp)
 
 
 if __name__ == "__main__":

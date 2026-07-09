@@ -85,8 +85,8 @@ async def main() -> None:
     )
     app = App(name="data_analysis_app", root_agent=agent, plugins=[plugin])
     async with InMemoryRunner(app=app) as runner:
-        resp = await runner.run_debug(QUESTION)
-        print(resp)
+        # run_debug prints the conversation as it runs.
+        await runner.run_debug(QUESTION)
 
 
 if __name__ == "__main__":
