@@ -215,7 +215,10 @@ asyncio.run(main())
 `plugin.get_tools()` returns six tools, all sharing the plugin's single sandbox
 so state persists across calls. Each returns a dict with a `success` flag and
 reports failures in the result rather than raising, so a bad call never aborts
-the agent run.
+the agent run. `success` means the tool *ran*: code that raised or a command
+that exited non-zero still returns `success: True` with the failure captured in
+`error` / `exit_code` — only a call that could not run at all returns
+`success: False`.
 
 | Tool | Does |
 |------|------|

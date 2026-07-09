@@ -80,7 +80,10 @@ so state written by one tool call is visible to the next. When the runner's
 
 `plugin.get_tools()` returns six tools. Each returns a JSON-serializable dict
 with a `success` flag — tools report failures in the result rather than raising,
-so a bad call never aborts the agent run.
+so a bad call never aborts the agent run. `success` means the tool *ran*: code
+that raised or a command that exited non-zero still returns `success: True` with
+the failure captured in `error` / `exit_code`. Only a call that could not run at
+all (sandbox unavailable, timeout) returns `success: False`.
 
 | Tool | Does | Key result fields |
 |------|------|-------------------|
@@ -133,7 +136,8 @@ uv run --extra examples python examples/data_analysis.py
 ## v1 notes
 
 - **Sequential tool calls.** One sandbox is shared per plugin; calls are meant
-  to run one at a time, not concurrently.
+  to run one at a time, not concurrently. Concurrent calls are safe for the
+  sandbox lifecycle (creation is locked) but share one filesystem and kernel.
 - **Text-only output.** Tools return text — `stdout`/`stderr`/file contents.
   Rich results (charts, dataframes, images) are not surfaced yet.
 - **Lazy, shared sandbox lifecycle.** The sandbox is created on the first tool
@@ -145,8 +149,8 @@ uv run --extra examples python examples/data_analysis.py
   later tool calls return failure results — pass e.g.
   `lifecycle={"on_timeout": {"action": "pause"}, "auto_resume": True}` to pause
   and auto-resume across idle gaps instead.
-- **Bounded output.** Large output is truncated with a `…[truncated N bytes]`
-  marker so a single call can't flood the model's context.
+- **Bounded output.** Output larger than 10 KB per field is truncated with a
+  `…[truncated N bytes]` marker so a single call can't flood the model's context.
 
 ## License
 
