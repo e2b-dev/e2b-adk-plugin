@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Lint
         run: uv run ruff check e2b_adk tests examples
@@ -44,7 +44,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Build sdist and wheel
         run: uv run python -m build
