@@ -93,16 +93,26 @@ so a bad call never aborts the agent run.
 
 ### Configuration
 
-`E2BPlugin` takes keyword-only options, all optional:
+`E2BPlugin` takes keyword-only options, all optional. Anything you don't set
+falls back to the E2B SDK's own default — the plugin adds no opinion of its own.
 
 ```python
 E2BPlugin(
-    api_key=None,       # defaults to E2B_API_KEY
-    template=None,      # E2B sandbox template
-    metadata=None,      # dict[str, str] attached to the sandbox
-    envs=None,          # dict[str, str] environment variables
-    timeout=None,       # sandbox timeout in seconds
+    # Common options
+    api_key=None,               # defaults to the E2B_API_KEY env var
+    template=None,              # E2B sandbox template
+    metadata=None,              # dict[str, str] attached to the sandbox
+    envs=None,                  # dict[str, str] environment variables
+    timeout=None,               # sandbox timeout in seconds
     plugin_name="e2b_plugin",
+    # Passed straight through to AsyncSandbox.create() — see the E2B SDK docs
+    secure=None,
+    allow_internet_access=None,
+    mcp=None,
+    network=None,
+    lifecycle=None,             # e.g. pause/auto-resume; defaults to E2B's behavior
+    volume_mounts=None,
+    # **opts: any other AsyncSandbox.create() / connection param (proxy, request_timeout, …)
 )
 ```
 
