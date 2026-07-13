@@ -13,6 +13,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 
+# Docs staged here for separate PRs to other repos (e2b-dev/docs, google/adk-docs)
+/docs/
+
 # Features
 /features/
 /CLAUDE.md
