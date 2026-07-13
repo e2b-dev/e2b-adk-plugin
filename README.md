@@ -68,14 +68,6 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`get_tools()` returns tool instances that all share the plugin's single sandbox,
-so state written by one tool call is visible to the next. When the runner's
-`async with` block exits, the plugin's `close()` fires and the sandbox is killed.
-
-> The examples use `gemini-2.5-flash`, which runs on a free Gemini key. Swap to
-> `gemini-2.5-pro` for stronger reasoning (it needs a paid tier — a free key
-> returns HTTP 429).
-
 ## Tools
 
 `plugin.get_tools()` returns six tools. Each returns a JSON-serializable dict
