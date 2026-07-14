@@ -213,6 +213,35 @@ async def test_before_tool_callback_redacts_sensitive_args(
     assert "/app/main.py" in caplog.text
 
 
+async def test_before_tool_callback_redacts_command_args(
+    caplog: LogCaptureFixture,
+) -> None:
+    plugin = E2BPlugin()
+    command_tools = [
+        tool
+        for tool in plugin.get_tools()
+        if tool.name in {"run_command", "start_background_command"}
+    ]
+    synthetic_secret = "Bearer_TEST_ONLY_COMMAND_SECRET"
+
+    with caplog.at_level(logging.DEBUG, logger="e2b_adk.plugin"):
+        for tool in command_tools:
+            await plugin.before_tool_callback(
+                tool=tool,
+                tool_args={
+                    "command": f"curl -H 'Authorization: {synthetic_secret}'",
+                    "cwd": "/workspace",
+                },
+                tool_context=None,
+            )
+
+    assert len(command_tools) == 2
+    assert synthetic_secret not in caplog.text
+    assert all(synthetic_secret not in repr(record.args) for record in caplog.records)
+    assert caplog.text.count("'command': '<redacted>'") == 2
+    assert "/workspace" in caplog.text
+
+
 async def test_callbacks_ignore_foreign_tools(caplog: LogCaptureFixture) -> None:
     # ADK dispatches plugin callbacks for every tool in the app; tools this
     # plugin doesn't own must produce no "E2B tool" logs or warnings.

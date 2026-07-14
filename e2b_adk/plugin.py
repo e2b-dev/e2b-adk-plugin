@@ -30,10 +30,11 @@ from .tools import (
 
 logger = logging.getLogger(__name__)
 
-#: Tool-arg keys whose *values* are masked before logging: ``envs`` may carry
-#: credentials, and ``content`` / ``code`` may be large or sensitive payloads.
-#: Other args (path, command, port, ...) are logged as-is to keep the trace useful.
-_SENSITIVE_ARG_KEYS = frozenset({"content", "code", "envs"})
+#: Tool-arg keys whose *values* are masked before logging: ``command`` and
+#: ``envs`` may carry credentials, while ``content`` / ``code`` may be large or
+#: sensitive payloads. Other args (path, cwd, port, ...) are logged as-is to
+#: keep the trace useful.
+_SENSITIVE_ARG_KEYS = frozenset({"command", "content", "code", "envs"})
 
 
 def _redact_args(tool_args: dict[str, Any]) -> dict[str, Any]:
