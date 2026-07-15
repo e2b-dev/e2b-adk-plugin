@@ -101,3 +101,18 @@ def test_no_truncation_when_small() -> None:
 def test_no_truncation_at_exact_limit() -> None:
     text = "a" * DEFAULT_MAX_OUTPUT_BYTES
     assert truncate_output(text) == text
+
+
+def test_lone_surrogate_is_normalized_to_valid_utf8() -> None:
+    out = truncate_output(f"before{chr(0xD800)}after")
+
+    assert out == "before\ufffdafter"
+    out.encode("utf-8")
+
+
+def test_valid_surrogate_pair_is_combined() -> None:
+    # json.loads can preserve a UTF-16 pair as two Python surrogate code points.
+    out = truncate_output(f"{chr(0xD83D)}{chr(0xDE00)}")
+
+    assert out == "😀"
+    out.encode("utf-8")

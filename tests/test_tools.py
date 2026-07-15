@@ -7,6 +7,7 @@ tool to it, and drives ``run_async`` directly.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -124,6 +125,24 @@ async def test_run_code_truncates_output(mock_sandbox: MagicMock) -> None:
     assert result["success"] is True
     assert "…[truncated" in result["stdout"]
     assert len(result["stdout"].encode("utf-8")) < len(big.encode("utf-8"))
+
+
+async def test_run_code_normalizes_json_decoded_lone_surrogate(
+    mock_sandbox: MagicMock,
+) -> None:
+    # E2B uses json.loads for streamed logs; a \udXXX escape can therefore
+    # reach this tool as a lone surrogate that must not escape run_async.
+    surrogate = json.loads(r'"\ud800"')
+    mock_sandbox.run_code = AsyncMock(
+        return_value=_execution(stdout=[surrogate], error=None)
+    )
+    tool = _make_run_code(mock_sandbox)
+
+    result = await tool.run_async(args={"code": "print(data)"}, tool_context=None)
+
+    assert result["success"] is True
+    assert result["stdout"] == "\ufffd"
+    result["stdout"].encode("utf-8")
 
 
 def test_run_code_declaration_language_enum(mock_sandbox: MagicMock) -> None:

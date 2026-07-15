@@ -29,16 +29,29 @@ def truncate_output(text: str, limit: int = DEFAULT_MAX_OUTPUT_BYTES) -> str:
     length. This keeps a single tool call from exhausting the agent's context
     while still reporting the exact omitted-byte count.
 
-    Text whose UTF-8 encoding is within ``limit`` is returned unchanged (no
-    marker). Otherwise the first ``limit`` bytes are kept (decoded back at a
-    valid character boundary, dropping any partial trailing char).
+    Text is first normalized to valid Unicode: well-formed surrogate pairs are
+    combined and lone surrogates are replaced with ``U+FFFD``. Text whose UTF-8
+    encoding is then within ``limit`` is returned without a marker. Otherwise
+    the first ``limit`` bytes are kept (decoded back at a valid character
+    boundary, dropping any partial trailing char).
     """
     if limit < 0:
         raise ValueError(f"limit must be non-negative, got {limit}")
-    encoded = text.encode("utf-8")
+    try:
+        encoded = text.encode("utf-8")
+        normalized = text
+    except UnicodeEncodeError:
+        # E2B builds streamed log text with json.loads(), which can produce
+        # Python strings containing UTF-16 surrogate code points. A UTF-16
+        # round-trip combines valid pairs and replaces only malformed lone
+        # surrogates, yielding text that is safe to encode and serialize.
+        normalized = text.encode("utf-16", errors="surrogatepass").decode(
+            "utf-16", errors="replace"
+        )
+        encoded = normalized.encode("utf-8")
     total = len(encoded)
     if total <= limit:
-        return text
+        return normalized
 
     # Decode the retained prefix, dropping any partial trailing char.
     kept = encoded[:limit].decode("utf-8", errors="ignore")
