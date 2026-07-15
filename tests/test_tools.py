@@ -12,6 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from e2b_code_interpreter import CommandExitException, FileType
+from google.adk.agents.invocation_context import InvocationContext
+from google.adk.events import Event
+from google.adk.flows.llm_flows.functions import get_long_running_function_calls
+from google.genai import types as genai_types
 
 from e2b_adk._results import DEFAULT_MAX_OUTPUT_BYTES
 from e2b_adk._sandbox import SandboxManager
@@ -485,9 +489,28 @@ async def test_background_start_failure(mock_sandbox: MagicMock) -> None:
     assert isinstance(result, dict)  # never raised
 
 
-def test_background_is_long_running(mock_sandbox: MagicMock) -> None:
+def test_background_is_regular_adk_tool_call(mock_sandbox: MagicMock) -> None:
     tool = _make_background(mock_sandbox)
-    assert tool.is_long_running is True
+    function_call = genai_types.FunctionCall(
+        id="call-1",
+        name=tool.name,
+        args={"command": "python -m http.server 3000"},
+    )
+    long_running_ids = get_long_running_function_calls(
+        [function_call], {tool.name: tool}
+    )
+    event = Event(
+        author="agent",
+        content=genai_types.Content(
+            role="model", parts=[genai_types.Part(function_call=function_call)]
+        ),
+        long_running_tool_ids=long_running_ids,
+    )
+
+    assert tool.is_long_running is False
+    assert long_running_ids == set()
+    assert event.is_final_response() is False
+    assert InvocationContext.should_pause_invocation(None, event) is False
 
 
 async def test_background_rejects_invalid_port_before_side_effects() -> None:

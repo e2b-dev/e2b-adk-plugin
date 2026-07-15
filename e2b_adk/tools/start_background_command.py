@@ -20,8 +20,9 @@ class StartBackgroundCommand(BaseTool):
 
     Backed by ``AsyncSandbox.commands.run(..., background=True)``, which returns
     an ``AsyncCommandHandle`` right away; this tool reports its ``pid`` without
-    waiting for the process to become ready. Marked ``is_long_running=True`` so
-    ADK treats it as a fire-and-return call.
+    waiting for the process to become ready. The E2B process is backgrounded,
+    but this is a regular ADK tool call because its complete result is returned
+    immediately; no later ``FunctionResponse`` is injected.
 
     When a ``port`` is given, a ``preview_url`` is built from the *synchronous*
     ``sandbox.get_host(port)`` (a bare host, e.g. ``<port>-<id>.e2b.app``). The
@@ -40,7 +41,6 @@ class StartBackgroundCommand(BaseTool):
                 "id. Provide a port to also get a preview URL for the exposed "
                 "service; the URL is syntactic and readiness is not verified."
             ),
-            is_long_running=True,
         )
         self.manager = manager
 
