@@ -90,7 +90,20 @@ class StartBackgroundCommand(BaseTool):
         command = _require_str(args, "command")
         if command is None:
             return failure_result("Missing or invalid required argument: command")
-        port: int | None = args.get("port")
+        raw_port = args.get("port")
+        if raw_port is None:
+            port: int | None = None
+        elif (
+            isinstance(raw_port, int)
+            and not isinstance(raw_port, bool)
+            and 1 <= raw_port <= 65535
+        ):
+            port = raw_port
+        else:
+            return failure_result(
+                "Invalid port: expected an integer between 1 and 65535",
+                command=command,
+            )
         cwd: str | None = args.get("cwd")
         envs: dict[str, str] | None = args.get("envs")
         timeout: int | None = args.get("timeout")

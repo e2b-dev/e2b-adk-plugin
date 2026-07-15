@@ -490,6 +490,24 @@ def test_background_is_long_running(mock_sandbox: MagicMock) -> None:
     assert tool.is_long_running is True
 
 
+async def test_background_rejects_invalid_port_before_side_effects() -> None:
+    invalid_ports: list[object] = ["evil.example/#", 8000.0, True, 0, -1, 65536]
+
+    for invalid_port in invalid_ports:
+        manager = SandboxManager()
+        manager.get = AsyncMock()  # type: ignore[method-assign]
+        tool = StartBackgroundCommand(manager)
+
+        result = await tool.run_async(
+            args={"command": "serve", "port": invalid_port}, tool_context=None
+        )
+
+        assert result["success"] is False
+        assert "port" in result["error"].lower()
+        assert result["command"] == "serve"
+        manager.get.assert_not_awaited()
+
+
 async def test_background_get_host_failure_degrades(mock_sandbox: MagicMock) -> None:
     # The command started (we have its pid); a get_host failure must NOT raise and
     # must NOT lose the pid — it degrades to no preview URL.
