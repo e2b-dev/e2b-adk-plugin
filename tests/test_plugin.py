@@ -288,11 +288,11 @@ async def test_callbacks_ignore_foreign_tools(caplog: LogCaptureFixture) -> None
     assert "E2B tool" not in caplog.text
 
 
-async def test_before_tool_callback_keeps_sandbox_alive(
+async def test_before_tool_callback_does_not_duplicate_manager_keepalive(
     mock_sandbox: MagicMock,
 ) -> None:
-    # Every owned tool call must push the sandbox expiry window forward using
-    # the configured timeout.
+    # SDK operations own the recurring keep-alive scope. The logging callback
+    # must not add a second set_timeout request for every ADK tool call.
     plugin = E2BPlugin(timeout=1234)
     mock_sandbox.set_timeout = AsyncMock()
     plugin._manager._sandbox = mock_sandbox  # sandbox already created
@@ -303,7 +303,7 @@ async def test_before_tool_callback_keeps_sandbox_alive(
     # Must return None: a non-None return would make ADK treat it as the tool
     # result and skip running the tool entirely.
     assert out is None
-    mock_sandbox.set_timeout.assert_awaited_once_with(1234)
+    mock_sandbox.set_timeout.assert_not_awaited()
 
 
 async def test_before_tool_callback_no_sandbox_no_keepalive(

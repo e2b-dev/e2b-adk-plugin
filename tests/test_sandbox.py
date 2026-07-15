@@ -151,6 +151,47 @@ async def test_refresh_timeout_after_shutdown_is_noop() -> None:
     assert manager._sandbox is None
 
 
+async def test_keep_alive_refreshes_throughout_active_operation() -> None:
+    """A blocked operation must receive entry, heartbeat, and exit refreshes.
+
+    Removing the heartbeat makes ``heartbeat_seen.wait()`` time out, so this
+    test mutation-proves the mid-call expiry guarantee rather than checking only
+    the entry/exit implementation details.
+    """
+    sandbox = _fresh_sandbox("keepalive-active")
+    heartbeat_seen = asyncio.Event()
+    refresh_count = 0
+
+    async def record_refresh(timeout: int) -> None:
+        nonlocal refresh_count
+        assert timeout == 2
+        refresh_count += 1
+        if refresh_count >= 2:
+            heartbeat_seen.set()
+
+    sandbox.set_timeout = AsyncMock(side_effect=record_refresh)
+    manager = SandboxManager(timeout=2)
+    manager._sandbox = sandbox
+    manager._keepalive_interval_seconds = lambda: 0.001  # type: ignore[method-assign]
+
+    async with manager.keep_alive(sandbox):
+        await asyncio.wait_for(heartbeat_seen.wait(), timeout=0.5)
+
+    assert refresh_count >= 3  # entry + at least one heartbeat + exit
+
+
+async def test_keep_alive_refresh_failure_never_breaks_operation() -> None:
+    sandbox = _fresh_sandbox("keepalive-failure")
+    sandbox.set_timeout = AsyncMock(side_effect=RuntimeError("api down"))
+    manager = SandboxManager()
+    manager._sandbox = sandbox
+
+    async with manager.keep_alive(sandbox):
+        operation_completed = True
+
+    assert operation_completed is True
+
+
 # --------------------------------------------------------------------------- #
 # Concurrency — the asyncio.Lock in get()/shutdown() must serialize creation
 # so a burst of tool calls can never create (and leak) more than one sandbox.

@@ -134,11 +134,13 @@ uv run --extra examples python examples/data_analysis.py
   Rich results (charts, dataframes, images) are not surfaced yet.
 - **Lazy, shared sandbox lifecycle.** The sandbox is created on the first tool
   call and reused for the agent's lifetime, then killed when the runner exits.
-- **Keep-alive while active, expiry when idle.** Every tool call pushes the
-  sandbox's expiry window forward by `timeout` (E2B's default is 300s), so an
-  active session never expires mid-run. An idle gap longer than `timeout` still
-  expires the sandbox under E2B's default lifecycle (`on_timeout: kill`), and
-  later tool calls return failure results — pass e.g.
+- **Keep-alive while active, expiry when idle.** While a sandbox SDK operation
+  is active, a best-effort heartbeat refreshes its `timeout` (E2B's default is
+  300s), including when a foreground call runs longer than that timeout. A
+  final refresh starts the full idle window when the operation ends. An idle
+  gap longer than `timeout` still expires the sandbox under E2B's default
+  lifecycle (`on_timeout: kill`), and later tool calls return failure results —
+  pass e.g.
   `lifecycle={"on_timeout": {"action": "pause"}, "auto_resume": True}` to pause
   and auto-resume across idle gaps instead.
 - **Bounded output.** Output larger than 10 KB per field is truncated with a

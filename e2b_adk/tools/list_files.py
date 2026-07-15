@@ -67,7 +67,8 @@ class ListFiles(BaseTool):
             return failure_result(f"Sandbox unavailable: {exc}", path=path)
 
         try:
-            entries = await sandbox.files.list(path)
+            async with self.manager.keep_alive(sandbox):
+                entries = await sandbox.files.list(path)
         except Exception as exc:  # noqa: BLE001 — missing dir/SDK failure → success:false
             logger.debug("list_files: could not list %s: %s", path, exc)
             return failure_result(f"Failed to list directory: {exc}", path=path)

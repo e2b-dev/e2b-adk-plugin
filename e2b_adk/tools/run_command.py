@@ -90,7 +90,8 @@ class RunCommand(BaseTool):
             run_kwargs["timeout"] = timeout
 
         try:
-            result = await sandbox.commands.run(command, **run_kwargs)
+            async with self.manager.keep_alive(sandbox):
+                result = await sandbox.commands.run(command, **run_kwargs)
         except CommandExitException as exc:
             # The command ran but exited non-zero — that is a successful call.
             return success_result(

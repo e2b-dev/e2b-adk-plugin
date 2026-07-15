@@ -65,7 +65,8 @@ class ReadFile(BaseTool):
             return failure_result(f"Sandbox unavailable: {exc}", path=path)
 
         try:
-            content = await sandbox.files.read(path)
+            async with self.manager.keep_alive(sandbox):
+                content = await sandbox.files.read(path)
         except Exception as exc:  # noqa: BLE001 — missing/SDK failure → success:false
             logger.debug("read_file: could not read %s: %s", path, exc)
             return failure_result(f"Failed to read file: {exc}", path=path)

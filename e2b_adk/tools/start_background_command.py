@@ -119,7 +119,8 @@ class StartBackgroundCommand(BaseTool):
             run_kwargs["timeout"] = timeout
 
         try:
-            handle = await sandbox.commands.run(command, **run_kwargs)
+            async with self.manager.keep_alive(sandbox):
+                handle = await sandbox.commands.run(command, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 — start failure → success:false
             logger.debug("start_background_command: could not start: %s", exc)
             return failure_result(f"Failed to start command: {exc}", command=command)

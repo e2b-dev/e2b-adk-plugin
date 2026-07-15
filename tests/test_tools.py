@@ -7,6 +7,7 @@ tool to it, and drives ``run_async`` directly.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -208,6 +209,41 @@ async def test_run_command_success(mock_sandbox: MagicMock) -> None:
     assert result["stderr"] == ""
     assert result["exit_code"] == 0
     assert result["command"] == "echo ok"
+
+
+async def test_run_command_heartbeat_covers_long_sdk_call() -> None:
+    sandbox = MagicMock(name="AsyncSandbox[long-command]")
+    sandbox.commands = MagicMock()
+    sandbox.set_timeout = AsyncMock()
+    heartbeat_seen = asyncio.Event()
+    refresh_count = 0
+
+    async def record_refresh(timeout: int) -> None:
+        nonlocal refresh_count
+        assert timeout == 2
+        refresh_count += 1
+        if refresh_count >= 2:
+            heartbeat_seen.set()
+
+    async def blocked_run(command: str, **kwargs: object) -> SimpleNamespace:
+        assert command == "sleep 1200"
+        await asyncio.wait_for(heartbeat_seen.wait(), timeout=0.5)
+        return SimpleNamespace(stdout="done", stderr="", exit_code=0)
+
+    sandbox.set_timeout = AsyncMock(side_effect=record_refresh)
+    sandbox.commands.run = AsyncMock(side_effect=blocked_run)
+    manager = SandboxManager(timeout=2)
+    manager._sandbox = sandbox
+    manager._keepalive_interval_seconds = lambda: 0.001  # type: ignore[method-assign]
+    tool = RunCommand(manager)
+
+    result = await tool.run_async(
+        args={"command": "sleep 1200", "timeout": 1200}, tool_context=None
+    )
+
+    assert result["success"] is True
+    assert result["stdout"] == "done"
+    assert refresh_count >= 3  # entry + heartbeat + exit
 
 
 async def test_run_command_nonzero_exit_caught(mock_sandbox: MagicMock) -> None:

@@ -94,12 +94,13 @@ class RunCode(BaseTool):
         try:
             # E2B runs every supported language through this single call, so
             # there is no per-language branching.
-            execution = await sandbox.run_code(
-                code,
-                language=language,
-                envs=envs,
-                timeout=timeout,
-            )
+            async with self.manager.keep_alive(sandbox):
+                execution = await sandbox.run_code(
+                    code,
+                    language=language,
+                    envs=envs,
+                    timeout=timeout,
+                )
         except Exception as exc:  # noqa: BLE001 — SDK/timeout failure → success:false
             logger.debug("run_code: execution could not run: %s", exc)
             return failure_result(f"Failed to run code: {exc}")

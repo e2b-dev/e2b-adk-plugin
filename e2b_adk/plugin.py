@@ -152,14 +152,9 @@ class E2BPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> dict[str, Any] | None:
-        """Keep the sandbox alive and log the tool about to run (non-intrusive)."""
+        """Log the owned sandbox tool about to run (non-intrusive)."""
         if not self._owns(tool):
             return None
-        # Reset the sandbox's expiry window on every tool call so a busy session
-        # outlives the E2B timeout (default 300s, counted from creation or the
-        # last set_timeout — not from last use). No-op before the sandbox exists;
-        # best-effort, never breaks the call.
-        await self._manager.refresh_timeout()
         logger.debug("E2B tool starting: %s args=%s", tool.name, _redact_args(tool_args))
         return None
 

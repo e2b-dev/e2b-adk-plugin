@@ -14,6 +14,7 @@ def mock_sandbox() -> MagicMock:
     sandbox = MagicMock(name="AsyncSandbox")
     sandbox.sandbox_id = "sbx_test_123"
     sandbox.kill = AsyncMock(return_value=True)
+    sandbox.set_timeout = AsyncMock()
     return sandbox
 
 

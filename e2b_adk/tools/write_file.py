@@ -74,7 +74,8 @@ class WriteFile(BaseTool):
             return failure_result(f"Sandbox unavailable: {exc}", path=path)
 
         try:
-            await sandbox.files.write(path, content)
+            async with self.manager.keep_alive(sandbox):
+                await sandbox.files.write(path, content)
         except Exception as exc:  # noqa: BLE001 — SDK/path failure → success:false
             logger.debug("write_file: could not write %s: %s", path, exc)
             return failure_result(f"Failed to write file: {exc}", path=path)

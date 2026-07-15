@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any, cast
 
 from e2b_code_interpreter import AsyncSandbox
 
 logger = logging.getLogger(__name__)
+
 
 class SandboxManager:
     """Lazily creates and caches one ``AsyncSandbox``.
@@ -39,7 +42,7 @@ class SandboxManager:
 
         The cached handle is returned as-is without a liveness check: an
         already-created sandbox that has since expired is not detected or
-        re-created here (see :meth:`refresh_timeout` for the keep-alive that
+        re-created here (see :meth:`keep_alive` for the keep-alive scope that
         prevents expiry during active use).
         """
         if self._sandbox is None:
@@ -53,19 +56,59 @@ class SandboxManager:
 
         An E2B sandbox expires ``timeout`` seconds (SDK default 300) after
         creation or the last ``set_timeout`` call — *not* after the last use.
-        Refreshing on every tool call keeps a busy session's sandbox alive
-        indefinitely; only an idle gap longer than the timeout still expires
-        it. Best-effort: a keep-alive failure is logged and swallowed so it
-        can never break the tool call that triggered it.
+        This one-shot operation is also used by :meth:`keep_alive`, whose
+        recurring heartbeat covers an SDK operation that runs longer than the
+        timeout. Best-effort: a keep-alive failure is logged and swallowed.
         """
         sandbox = self._sandbox
-        if sandbox is None:
+        if sandbox is not None:
+            await self._refresh_sandbox(sandbox)
+
+    def _timeout_seconds(self) -> int:
+        """Return the caller-configured TTL or E2B's default."""
+        timeout = self._opts.get("timeout")
+        if isinstance(timeout, int) and timeout > 0:
+            return timeout
+        return int(AsyncSandbox.default_sandbox_timeout)
+
+    def _keepalive_interval_seconds(self) -> float:
+        """Refresh halfway through the TTL, with a small positive floor."""
+        return max(self._timeout_seconds() / 2, 0.1)
+
+    async def _refresh_sandbox(self, sandbox: AsyncSandbox) -> None:
+        """Best-effort refresh for the currently cached sandbox."""
+        if self._sandbox is not sandbox:
             return
-        timeout: int = self._opts.get("timeout") or AsyncSandbox.default_sandbox_timeout
         try:
-            await sandbox.set_timeout(timeout)
+            # E2B's class_method_variant decorator exposes set_timeout to mypy
+            # as Any | None even though the bound instance method is awaitable.
+            await cast(Any, sandbox).set_timeout(self._timeout_seconds())
         except Exception as exc:  # noqa: BLE001 — keep-alive is best-effort
             logger.debug("sandbox keep-alive failed: %s", exc)
+
+    async def _keepalive_loop(self, sandbox: AsyncSandbox) -> None:
+        """Refresh ``sandbox`` until its active SDK operation finishes."""
+        while self._sandbox is sandbox:
+            await asyncio.sleep(self._keepalive_interval_seconds())
+            await self._refresh_sandbox(sandbox)
+
+    @asynccontextmanager
+    async def keep_alive(self, sandbox: AsyncSandbox) -> AsyncIterator[None]:
+        """Keep ``sandbox`` alive for the full duration of one SDK operation.
+
+        The first refresh handles cached sandboxes, the heartbeat prevents a
+        call longer than the TTL from expiring mid-run, and the final refresh
+        starts a full idle window when the operation completes. Every refresh
+        is best-effort so lifecycle maintenance never changes a tool result.
+        """
+        await self._refresh_sandbox(sandbox)
+        heartbeat = asyncio.create_task(self._keepalive_loop(sandbox))
+        try:
+            yield
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            await self._refresh_sandbox(sandbox)
 
     async def shutdown(self) -> None:
         """Kill the sandbox if one exists and clear the cache.
