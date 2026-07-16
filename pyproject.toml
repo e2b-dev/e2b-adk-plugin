@@ -9,7 +9,7 @@ description = "Google ADK plugin backed by E2B sandboxes."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "e2b-adk contributors" }]
+authors = [{ name = "e2b", email = "hello@e2b.dev" }]
 keywords = ["e2b", "adk", "google-adk", "sandbox", "agent", "code-interpreter"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
@@ -21,6 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "e2b>=2.32.0,<3",
     "e2b-code-interpreter>=2.8.1,<3",
     "google-adk>=2.3.0,<3",
 ]

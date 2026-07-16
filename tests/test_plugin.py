@@ -10,12 +10,20 @@ import inspect
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+from e2b import ConnectionConfig
 from e2b.connection_config import ApiParams
 from e2b_code_interpreter import AsyncSandbox
 from pytest import LogCaptureFixture
 
 from e2b_adk import E2BPlugin
 from e2b_adk._sandbox import SandboxManager
+
+
+def test_e2b_integration_attribution() -> None:
+    config = ConnectionConfig()
+
+    user_agent_products = config.headers["User-Agent"].split()
+    assert "e2b-adk/0.1.0" in user_agent_products
 
 
 def test_no_sandbox_on_init(patched_create: AsyncMock) -> None:
