@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version
+
 from e2b import ConnectionConfig
 
 from .plugin import E2BPlugin
@@ -17,10 +19,12 @@ from .tools import (
 # E2B's integration hook is process-wide and must be set before the SDK builds
 # a connection config. Importing the modules above has no runtime side effects;
 # plugin construction can only happen after package initialization completes.
-ConnectionConfig.set_integration("e2b-adk/0.1.0")
+__version__ = version("e2b-adk")
+ConnectionConfig.set_integration(f"e2b-adk/{__version__}")
 
 __all__ = [
     "E2BPlugin",
+    "__version__",
     "ListFiles",
     "ReadFile",
     "RunCode",
