@@ -1,2 +1,33 @@
-.claude/
-e2b-adk/
+/.agents/
+/.claude/
+/.planning/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docs staged here for separate PRs to other repos (e2b-dev/docs, google/adk-docs)
+/docs/
+
+# Features
+/features/
+/CLAUDE.md
+/AGENTS.md
+/CLAUDE_ADDITIONS.md
+/AGENTS_ADDITIONS.md
+/DECISIONS.md
+
+# Environment
+.env
+!.env.example
+
+# Verification credentials (never commit)
+.env.verification
+/.claude/verification/auth-state.json
