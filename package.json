@@ -25,6 +25,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:live": "node --env-file=.env --import tsx scripts/live.ts",
+    "example:analysis": "node --env-file=.env --import tsx examples/data-analysis.ts",
+    "example:executor": "node --env-file=.env --import tsx examples/code-executor.ts",
     "lint": "eslint .",
     "format:check": "prettier --check .",
     "format": "prettier --write .",

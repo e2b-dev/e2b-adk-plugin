@@ -7,7 +7,8 @@
     "skipLibCheck": true,
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": { "@e2b/adk": ["./src/index.ts"] }
   },
   "include": [
     "src/**/*.ts",
