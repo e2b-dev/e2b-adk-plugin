@@ -52,7 +52,7 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
       [CodeExecutionLanguage.POWERSHELL]: undefined,
       [CodeExecutionLanguage.WINDOWS_CMD]: undefined,
     }[input.language]
-    if (!language)
+    if (typeof language !== 'string')
       return fail(
         'Unsupported language. Use python, javascript, typescript or shell.',
       )

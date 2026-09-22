@@ -22,7 +22,13 @@ describe('code executor', () => {
     await executor.close()
   })
 
-  it.each([Language.UNSPECIFIED, Language.WINDOWS_CMD, Language.POWERSHELL])(
+  it.each([
+    Language.UNSPECIFIED,
+    Language.WINDOWS_CMD,
+    Language.POWERSHELL,
+    '__proto__' as Language,
+    'constructor' as Language,
+  ])(
     'rejects unsupported %s without creating a workspace',
     async (language) => {
       const { create } = mockSandbox()
