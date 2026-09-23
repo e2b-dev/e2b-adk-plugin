@@ -133,7 +133,7 @@ describe('workspace lifecycle', () => {
       if (how === 'abort') abort.abort()
       if (how === 'SDK timeout') running.reject(new TimeoutError('timed out'))
       await vi.advanceTimersByTimeAsync(1000)
-      expect(await result).toEqual({ stopped })
+      expect(await result).toEqual({ stopped, kernelRestarted: true })
       expect(sandbox.restartCodeContext).toHaveBeenCalledWith({
         id: 'ctx-python',
         language: 'python',
@@ -231,26 +231,6 @@ describe('workspace lifecycle', () => {
     },
   )
 
-  it('falls back to killing the command itself when the group kill fails', async () => {
-    vi.useFakeTimers()
-    const { sandbox } = mockSandbox()
-    const exited = deferred<never>()
-    exited.promise.catch(() => undefined)
-    sandbox.handle.wait.mockReturnValueOnce(exited.promise)
-    sandbox.handle.kill.mockImplementation(async () => {
-      exited.reject(new Error('killed'))
-      return true
-    })
-    sandbox.commands.run.mockImplementation(async (_command, opts) => {
-      if (opts?.background) return sandbox.handle
-      throw new Error('no such group')
-    })
-    const result = workspace().runCommand('x', {}, info(), { timeoutMs: 1000 })
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(await result).toMatchObject({ stopped: 'timed_out' })
-    expect(sandbox.handle.kill).toHaveBeenCalledTimes(1)
-  })
-
   it('destroy fails queued work without recreating, rejects new work meanwhile, then allows a new workspace', async () => {
     const { sandbox, create } = mockSandbox()
     const ws = workspace()
@@ -278,22 +258,6 @@ describe('workspace lifecycle', () => {
     await ws.run(async () => 1, later)
     expect(later.created).toBe(true)
     expect(create).toHaveBeenCalledTimes(2)
-  })
-
-  it('kills a sandbox whose creation finished after destroy', async () => {
-    const { sandbox, create } = mockSandbox()
-    const pending = deferred<Sandbox>()
-    create.mockReturnValueOnce(pending.promise)
-    const ws = workspace()
-    const work = vi.fn()
-    const first = ws.run(work, info())
-    await tick()
-    await ws.destroy()
-    pending.resolve(sandbox as unknown as Sandbox)
-    await expect(first).rejects.toBeInstanceOf(WorkspaceDestroyedError)
-    expect(work).not.toHaveBeenCalled()
-    expect(sandbox.kill).toHaveBeenCalledTimes(1)
-    expect(ws.idle).toBe(true)
   })
 
   it('keeps a failed kill handle blocked and retryable', async () => {
@@ -383,5 +347,246 @@ describe('workspace lifecycle', () => {
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(10_000)
     expect(sandbox.setTimeout.mock.calls.length - calls).toBe(7)
+  })
+})
+
+describe('cleanup and deadline boundaries', () => {
+  const noSuchGroup = () =>
+    new CommandExitError({
+      stdout: '',
+      stderr: 'bash: kill: (-101) - No such process\n',
+      exitCode: 1,
+      error: 'exit status 1',
+    })
+
+  it('destroy waits for an in-flight create and kills the late sandbox', async () => {
+    const { sandbox, create } = mockSandbox()
+    const pending = deferred<Sandbox>()
+    create.mockReturnValueOnce(pending.promise)
+    const ws = workspace()
+    const work = vi.fn()
+    const first = ws.run(work, info())
+    await tick()
+    let destroyed = false
+    const destroy = ws.destroy().then(() => (destroyed = true))
+    await tick()
+    expect(destroyed).toBe(false)
+    pending.resolve(sandbox as unknown as Sandbox)
+    await destroy
+    expect(sandbox.kill).toHaveBeenCalledTimes(1)
+    await expect(first).rejects.toBeInstanceOf(WorkspaceDestroyedError)
+    expect(work).not.toHaveBeenCalled()
+  })
+
+  it('keeps a late sandbox whose kill failed blocked and retryable', async () => {
+    const { sandbox, create } = mockSandbox()
+    const pending = deferred<Sandbox>()
+    create.mockReturnValueOnce(pending.promise)
+    sandbox.kill.mockRejectedValueOnce(new Error('network down'))
+    const ws = workspace()
+    const first = ws.run(async () => 1, info()).catch((error) => error)
+    await tick()
+    const destroy = ws.destroy()
+    pending.resolve(sandbox as unknown as Sandbox)
+    await expect(destroy).rejects.toThrow('Sandbox cleanup failed')
+    expect(await first).toBeInstanceOf(WorkspaceDestroyedError)
+    expect(ws.idle).toBe(false)
+    const work = vi.fn()
+    await expect(ws.run(work, info())).rejects.toThrow('Retry destroy.')
+    expect(work).not.toHaveBeenCalled()
+    await ws.destroy()
+    expect(sandbox.kill).toHaveBeenCalledTimes(2)
+    expect(ws.idle).toBe(true)
+    await ws.run(async () => 2, info())
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not start an operation whose workspace was destroyed during the TTL refresh', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    await ws.run(async () => 1, info())
+    const refresh = deferred<void>()
+    sandbox.setTimeout.mockReturnValueOnce(refresh.promise)
+    const effect = vi.fn(async () => 42)
+    const run = ws.run(effect, info())
+    await tick()
+    await ws.destroy()
+    refresh.resolve()
+    await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
+    expect(effect).not.toHaveBeenCalled()
+  })
+
+  it('does not start an operation after a failed destroy blocked the live sandbox', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    await ws.run(async () => 1, info())
+    const refresh = deferred<void>()
+    sandbox.setTimeout.mockReturnValueOnce(refresh.promise)
+    const effect = vi.fn(async () => 42)
+    const run = ws.run(effect, info())
+    await tick()
+    sandbox.kill.mockRejectedValueOnce(new Error('down'))
+    await expect(ws.destroy()).rejects.toThrow('Sandbox cleanup failed')
+    refresh.resolve()
+    await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
+    expect(effect).not.toHaveBeenCalled()
+  })
+
+  it('does not run code whose workspace was destroyed while its context was created', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    await ws.run(async () => 1, info())
+    const context = deferred<{ id: string; language: string; cwd: string }>()
+    sandbox.createCodeContext.mockReturnValueOnce(context.promise)
+    const run = ws.runCode('x', 'python', undefined, info(), {
+      timeoutMs: 10_000,
+    })
+    await tick()
+    await ws.destroy()
+    context.resolve({ id: 'late', language: 'python', cwd: '/home/user' })
+    await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
+    expect(sandbox.runCode).not.toHaveBeenCalled()
+  })
+
+  it('does not report success for an operation that finished after destroy', async () => {
+    mockSandbox()
+    const ws = workspace()
+    const gate = deferred<number>()
+    const run = ws.run(() => gate.promise, info())
+    await tick()
+    await tick()
+    await ws.destroy()
+    gate.resolve(42)
+    await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
+  })
+
+  it('blocks the workspace instead of trusting a leader-only kill when the group kill fails', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const exited = deferred<never>()
+    exited.promise.catch(() => undefined)
+    sandbox.handle.wait.mockReturnValueOnce(exited.promise)
+    sandbox.handle.kill.mockImplementation(async () => {
+      exited.reject(new Error('killed'))
+      return true
+    })
+    sandbox.commands.run.mockImplementation(async (_command, opts) => {
+      if (opts?.background) return sandbox.handle
+      throw new Error('network failure')
+    })
+    const ws = workspace()
+    const run = ws
+      .runCommand('loop', {}, info(), { timeoutMs: 100 })
+      .catch((error) => error)
+    await vi.advanceTimersByTimeAsync(100)
+    const error = await run
+    expect(error).toBeInstanceOf(WorkspaceBlockedError)
+    expect(error.message).toContain('could not be confirmed')
+    expect(sandbox.handle.kill).not.toHaveBeenCalled()
+    const effect = vi.fn(async () => 42)
+    await expect(ws.run(effect, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+    expect(effect).not.toHaveBeenCalled()
+    await ws.destroy()
+    expect(await ws.run(effect, info())).toBe(42)
+  })
+
+  it('blocks the workspace when the command does not exit after its group was killed', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    sandbox.handle.wait.mockReturnValue(new Promise(() => {}))
+    const ws = workspace()
+    const run = ws
+      .runCommand('loop', {}, info(), { timeoutMs: 100 })
+      .catch((error) => error)
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(await run).toBeInstanceOf(WorkspaceBlockedError)
+    await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+  })
+
+  it('treats "No such process" from the group kill as confirmed absence', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const exited = deferred<never>()
+    exited.promise.catch(() => undefined)
+    sandbox.handle.wait.mockReturnValueOnce(exited.promise)
+    sandbox.commands.run.mockImplementation(async (_command, opts) => {
+      if (opts?.background) return sandbox.handle
+      exited.reject(new Error('exited'))
+      throw noSuchGroup()
+    })
+    const ws = workspace()
+    const run = ws.runCommand('x', {}, info(), { timeoutMs: 100 })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await run).toMatchObject({ stopped: 'timed_out' })
+    expect(await ws.run(async () => 1, info())).toBe(1)
+  })
+
+  it('counts a slow command start against the deadline and kills the late handle', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const exited = deferred<never>()
+    exited.promise.catch(() => undefined)
+    sandbox.handle.wait.mockReturnValueOnce(exited.promise)
+    const start = deferred<typeof sandbox.handle>()
+    sandbox.commands.run.mockImplementation(async (command, opts) => {
+      if (opts?.background) return start.promise
+      if (command === 'kill -9 -- -101') exited.reject(new Error('killed'))
+      return { stdout: '', stderr: '', exitCode: 0 }
+    })
+    const ws = workspace()
+    let settled = false
+    const run = ws
+      .runCommand('echo x', {}, info(), { timeoutMs: 100 })
+      .finally(() => (settled = true))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(settled).toBe(false)
+    start.resolve(sandbox.handle)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await run).toMatchObject({ stopped: 'timed_out' })
+    expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
+  })
+
+  it('blocks the workspace when a stopped command never delivers its handle, and kills it if it arrives', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const start = deferred<typeof sandbox.handle>()
+    sandbox.commands.run.mockImplementation(async (_command, opts) =>
+      opts?.background
+        ? start.promise
+        : { stdout: '', stderr: '', exitCode: 0 },
+    )
+    const ws = workspace()
+    const run = ws
+      .runCommand('echo x', {}, info(), { timeoutMs: 100 })
+      .catch((error) => error)
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(await run).toBeInstanceOf(WorkspaceBlockedError)
+    await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+    start.resolve(sandbox.handle)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
+  })
+
+  it('counts context creation against the deadline and does not claim a kernel restart', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const context = deferred<{ id: string; language: string; cwd: string }>()
+    sandbox.createCodeContext.mockReturnValueOnce(context.promise)
+    const ws = workspace()
+    const run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: false })
+    expect(sandbox.runCode).not.toHaveBeenCalled()
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+    context.resolve({ id: 'ctx-java', language: 'java', cwd: '/home/user' })
+    await vi.advanceTimersByTimeAsync(0)
+    await ws.runCode('y', 'java', undefined, info(), { timeoutMs: 100 })
+    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
   })
 })

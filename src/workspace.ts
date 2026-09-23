@@ -23,7 +23,8 @@ const RECOVERY_WAIT_MS = 30_000
 const SDK_GRACE_MS = 5_000
 
 export type Stop = 'timed_out' | 'aborted'
-export type CodeOutcome = { execution: Execution } | { stopped: Stop }
+export type CodeOutcome =
+  { execution: Execution } | { stopped: Stop; kernelRestarted: boolean }
 export type CommandOutcome =
   { result: CommandResult } | { stopped: Stop; stdout: string; stderr: string }
 
@@ -83,6 +84,19 @@ function turn(previous: Promise<unknown>, signal?: AbortSignal) {
   })
 }
 
+type Settled<T> = { value: T } | { error: unknown } | undefined
+
+/** How `promise` settled within `ms`; undefined if it did not. */
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<Settled<T>> {
+  return withTimeout(
+    promise.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    ),
+    ms,
+  ).catch(() => undefined)
+}
+
 /** Aborts on the caller's signal or at the deadline, whichever comes first. */
 function stopper(signal: AbortSignal | undefined, timeoutMs: number) {
   let reason: Stop | undefined
@@ -110,12 +124,21 @@ function stopper(signal: AbortSignal | undefined, timeoutMs: number) {
   }
 }
 
+type Operation<T> = (
+  sandbox: Sandbox,
+  current: Current,
+  /** Throws if the workspace was destroyed or blocked since the operation started. */
+  check: () => void,
+) => Promise<T>
+
 /**
  * One lazily created, serialized sandbox for one ADK session. An expired or
  * destroyed sandbox is never silently replaced inside a running operation.
  */
 export class Workspace {
   private current?: Current
+  /** An in-flight create; destroy() owns its result. */
+  private creating?: Promise<Sandbox | undefined>
   private queue: Promise<unknown> = Promise.resolve()
   private epoch = 0
   private pending = 0
@@ -137,7 +160,7 @@ export class Workspace {
   }
 
   run<T>(
-    operation: (sandbox: Sandbox, current: Current) => Promise<T>,
+    operation: Operation<T>,
     info: RunInfo,
     signal?: AbortSignal,
   ): Promise<T> {
@@ -154,48 +177,41 @@ export class Workspace {
   }
 
   private async serve<T>(
-    operation: (sandbox: Sandbox, current: Current) => Promise<T>,
+    operation: Operation<T>,
     info: RunInfo,
     epoch: number,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
-    if (this.blocked) throw this.blocked
+    const check = () => {
+      if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
+      if (this.blocked) throw this.blocked
+    }
+    check()
     if (signal?.aborted) throw new OperationAbortedError()
     let current = this.current
     if (current) {
       try {
         await current.sandbox.setTimeout(this.ttl)
       } catch (error) {
-        if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
+        check()
         // A paused sandbox also reports 404 here; connect() resumes it.
         // Only a sandbox that cannot be resumed is gone.
         if (
           error instanceof SandboxNotFoundError &&
           !(await this.resume(current))
         ) {
+          check()
           if (this.current === current) this.current = undefined
           throw new WorkspaceExpiredError()
         }
-        if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
       }
     } else {
-      const sandbox = this.options.template
-        ? await Sandbox.create(
-            this.options.template,
-            this.options.sandboxOptions,
-          )
-        : await Sandbox.create(this.options.sandboxOptions)
-      if (epoch !== this.epoch) {
-        // ponytail: best effort; if this kill fails, the sandbox TTL releases it.
-        await withTimeout(sandbox.kill(), RECOVERY_WAIT_MS).catch(
-          () => undefined,
-        )
-        throw new WorkspaceDestroyedError()
-      }
-      current = this.current = { sandbox, contexts: new Map() }
+      current = await this.create(epoch)
       info.created = true
     }
+    // Setup awaited the SDK: recheck before any side effect.
+    check()
+    if (signal?.aborted) throw new OperationAbortedError()
     const { sandbox } = current
     const refresh = () =>
       sandbox.setTimeout(this.ttl).catch(() => {
@@ -217,7 +233,9 @@ export class Workspace {
     }
     schedule()
     try {
-      return await operation(sandbox, current)
+      const value = await operation(sandbox, current, check)
+      if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
+      return value
     } catch (error) {
       if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
       throw error
@@ -229,6 +247,29 @@ export class Workspace {
     }
   }
 
+  private async create(epoch: number): Promise<Current> {
+    const creating = this.options.template
+      ? Sandbox.create(this.options.template, this.options.sandboxOptions)
+      : Sandbox.create(this.options.sandboxOptions)
+    this.creating = creating.catch(() => undefined)
+    let sandbox: Sandbox
+    try {
+      sandbox = await creating
+    } finally {
+      this.creating = undefined
+    }
+    // Destroyed meanwhile: destroy() kills this sandbox and keeps it if that fails.
+    if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
+    return (this.current = { sandbox, contexts: new Map() })
+  }
+
+  /** Block reuse until destroy() succeeds, unless this sandbox is already gone. */
+  private block(current: Current, message: string): Error {
+    const error = new WorkspaceBlockedError(`${message} ${this.cleanupHint}`)
+    if (this.current === current) this.blocked = error
+    return error
+  }
+
   runCode(
     code: string,
     language: string,
@@ -237,39 +278,51 @@ export class Workspace {
     { signal, timeoutMs }: RunOptions,
   ): Promise<CodeOutcome> {
     return this.run(
-      async (sandbox, current) => {
-        const context = await this.context(current, language)
-        if (signal?.aborted) throw new OperationAbortedError()
+      async (sandbox, current, check) => {
+        // The deadline covers kernel start-up too.
         const stop = stopper(signal, timeoutMs)
-        const execution = sandbox.runCode(code, {
-          context,
-          envs,
-          timeoutMs: timeoutMs + SDK_GRACE_MS,
-        })
-        execution.catch(() => undefined)
         try {
-          return { execution: await stop.race(execution) }
-        } catch (error) {
-          const reason =
-            stop.reason ??
-            (error instanceof TimeoutError ? 'timed_out' : undefined)
-          if (!reason) throw error
-          // A timed-out kernel stays busy; only a restart stops the code.
+          let context: Context
           try {
-            await withTimeout(
-              sandbox.restartCodeContext(context),
-              RECOVERY_WAIT_MS,
-            )
-          } catch {
-            const error = new WorkspaceBlockedError(
-              `The ${language} kernel could not be restarted after the code was stopped. ${this.cleanupHint}`,
-            )
-            if (this.current === current) this.blocked = error
+            context = await stop.race(this.context(current, language))
+          } catch (error) {
+            // Nothing ran yet; the context stays cached for the next call.
+            if (stop.reason)
+              return { stopped: stop.reason, kernelRestarted: false }
             throw error
           }
-          // The restart closes the open stream; don't let it outlive this turn.
-          await withTimeout(execution, RECOVERY_WAIT_MS).catch(() => undefined)
-          return { stopped: reason }
+          check()
+          const execution = sandbox.runCode(code, {
+            context,
+            envs,
+            timeoutMs: timeoutMs + SDK_GRACE_MS,
+          })
+          execution.catch(() => undefined)
+          try {
+            return { execution: await stop.race(execution) }
+          } catch (error) {
+            const reason =
+              stop.reason ??
+              (error instanceof TimeoutError ? 'timed_out' : undefined)
+            if (!reason) throw error
+            // A timed-out kernel stays busy; only a restart stops the code.
+            try {
+              await withTimeout(
+                sandbox.restartCodeContext(context),
+                RECOVERY_WAIT_MS,
+              )
+            } catch {
+              throw this.block(
+                current,
+                `The ${language} kernel could not be restarted after the code was stopped.`,
+              )
+            }
+            // The restart closes the open stream; don't let it outlive this turn.
+            await withTimeout(execution, RECOVERY_WAIT_MS).catch(
+              () => undefined,
+            )
+            return { stopped: reason, kernelRestarted: true }
+          }
         } finally {
           stop.dispose()
         }
@@ -286,23 +339,53 @@ export class Workspace {
     { signal, timeoutMs }: RunOptions,
   ): Promise<CommandOutcome> {
     return this.run(
-      async (sandbox) => {
-        // Own process group, so stopping the command also stops its children.
-        // No abort signal here: aborting the start request leaves the process running.
-        const handle = await sandbox.commands.run(
-          `exec setsid -w /bin/bash -c ${quote(command)}`,
-          { ...options, background: true, timeoutMs: 0 },
-        )
+      async (sandbox, current) => {
+        // The deadline covers the start request too.
         const stop = stopper(signal, timeoutMs)
         try {
-          return { result: await stop.race(handle.wait()) }
-        } catch (error) {
-          if (error instanceof CommandExitError && !stop.reason)
-            return { result: error }
-          if (!stop.reason) throw error
-          await this.killGroup(sandbox, handle)
+          // Own process group, so stopping the command also stops its children.
+          // No abort signal here: aborting the start request leaves the process running.
+          const starting = sandbox.commands.run(
+            `exec setsid -w /bin/bash -c ${quote(command)}`,
+            { ...options, background: true, timeoutMs: 0 },
+          )
+          let handle: CommandHandle
+          try {
+            handle = await stop.race(starting)
+          } catch (error) {
+            if (!stop.reason) throw error
+            // Stopped while starting: the process may still start, so own it.
+            const late = await settleWithin(starting, RECOVERY_WAIT_MS)
+            if (!late) {
+              void starting.then(
+                (handle) => this.stopGroup(sandbox, handle),
+                () => undefined,
+              )
+              throw this.block(
+                current,
+                'The command was stopped while starting and could not be confirmed stopped.',
+              )
+            }
+            if ('error' in late) throw late.error
+            handle = late.value
+          }
+          if (!stop.reason) {
+            try {
+              return { result: await stop.race(handle.wait()) }
+            } catch (error) {
+              if (!stop.reason) {
+                if (error instanceof CommandExitError) return { result: error }
+                throw error
+              }
+            }
+          }
+          if (!(await this.stopGroup(sandbox, handle)))
+            throw this.block(
+              current,
+              'The command could not be confirmed stopped.',
+            )
           return {
-            stopped: stop.reason,
+            stopped: stop.reason!,
             stdout: handle.stdout,
             stderr: handle.stderr,
           }
@@ -315,20 +398,24 @@ export class Workspace {
     )
   }
 
-  private async killGroup(sandbox: Sandbox, handle: CommandHandle) {
+  /** SIGKILL the command's process group; true only if it is confirmed gone. */
+  private async stopGroup(sandbox: Sandbox, handle: CommandHandle) {
     try {
       await withTimeout(
         sandbox.commands.run(`kill -9 -- -${handle.pid}`),
         RECOVERY_WAIT_MS,
       )
-    } catch {
-      // The group may be gone already; still make sure the leader is.
-      await withTimeout(handle.kill(), RECOVERY_WAIT_MS)
+    } catch (error) {
+      // kill reports "No such process" once the whole group has exited.
+      // Any other failure leaves the group's state unknown.
+      if (!(
+        error instanceof CommandExitError &&
+        /No such process/.test(error.stderr)
+      ))
+        return false
     }
-    await withTimeout(
-      handle.wait().catch(() => undefined),
-      RECOVERY_WAIT_MS,
-    )
+    const exited = await settleWithin(handle.wait(), RECOVERY_WAIT_MS)
+    return exited !== undefined
   }
 
   private async resume(current: Current): Promise<boolean> {
@@ -361,6 +448,9 @@ export class Workspace {
 
   private async kill() {
     this.epoch++
+    // A create still in flight belongs to this destroy, even if it lands later.
+    const late = await this.creating
+    if (late) this.current = { sandbox: late, contexts: new Map() }
     const current = this.current
     if (!current) return
     try {

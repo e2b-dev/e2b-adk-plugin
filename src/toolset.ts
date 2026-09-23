@@ -108,10 +108,15 @@ export class E2BToolset extends BaseToolset {
               outcome.stopped === 'timed_out'
                 ? `exceeded ${ms} ms`
                 : 'was cancelled'
-            return failure(
-              `Execution ${why}. The ${input.language} kernel was restarted; its variables and imports were lost.`,
-              { [outcome.stopped]: true, kernel_restarted: true },
-            )
+            return outcome.kernelRestarted
+              ? failure(
+                  `Execution ${why}. The ${input.language} kernel was restarted; its variables and imports were lost.`,
+                  { [outcome.stopped]: true, kernel_restarted: true },
+                )
+              : failure(
+                  `Execution ${why} while the ${input.language} kernel was starting; the code did not run.`,
+                  { [outcome.stopped]: true },
+                )
           }
           const { execution } = outcome
           return {

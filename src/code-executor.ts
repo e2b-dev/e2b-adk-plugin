@@ -81,7 +81,7 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
       )
       if ('stopped' in outcome)
         return fail(
-          `Execution ${outcome.stopped === 'timed_out' ? `exceeded ${this.timeoutMs} ms` : 'was cancelled'}. The kernel was restarted; its variables and imports were lost.`,
+          `Execution ${outcome.stopped === 'timed_out' ? `exceeded ${this.timeoutMs} ms` : 'was cancelled'}. ${outcome.kernelRestarted ? 'The kernel was restarted; its variables and imports were lost.' : 'The code did not run.'}`,
         )
       const { execution } = outcome
       const text = execution.text ? `\n${execution.text}` : ''

@@ -197,6 +197,29 @@ async function stopMechanisms() {
     console.log(`PASS command abort after ${delay} ms leaves no process`)
   }
 
+  // The deadline covers the start request: a 1 ms limit kills the late handle.
+  result = await raw(
+    'run_command',
+    { command: loop('/tmp/start'), timeoutMs: 1 },
+    ctx,
+  )
+  assert.equal(result.timed_out, true, JSON.stringify(result))
+  await stopped(ctx, '/tmp/start', 'sleep 600')
+  console.log('PASS a deadline during command start kills the late process')
+
+  // ...and kernel start-up: code that never started does not claim a restart.
+  result = await raw(
+    'run_code',
+    { code: 'System.out.println(1);', language: 'java', timeoutMs: 1 },
+    ctx,
+  )
+  assert.equal(result.timed_out, true, JSON.stringify(result))
+  assert.equal(result.kernel_restarted, undefined)
+  assert.match(String(result.error), /did not run/)
+  console.log(
+    'PASS a deadline during kernel start-up reports that code did not run',
+  )
+
   const loops: Record<string, [string, string, string]> = {
     python: ['v = 1', 'while True:\n    pass', 'print(v)'],
     javascript: ['var v = 1', 'while (true) {}', 'console.log(v)'],
