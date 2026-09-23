@@ -26,33 +26,40 @@ The integration is model-independent. The examples use Gemini 2.5 Flash through 
 import { E2BToolset } from '@e2b/adk'
 import { InMemoryRunner, LlmAgent } from '@google/adk'
 
-const toolset = new E2BToolset()
-const runner = new InMemoryRunner({
-  agent: new LlmAgent({
-    name: 'calculator',
-    model: 'gemini-2.5-flash',
-    instruction: 'Use run_code to verify calculations. Check its error field.',
-    tools: [toolset],
-  }),
-})
+async function calculate(userId: string, question: string): Promise<string> {
+  const toolset = new E2BToolset()
+  const runner = new InMemoryRunner({
+    agent: new LlmAgent({
+      name: 'calculator',
+      model: 'gemini-2.5-flash',
+      instruction:
+        'Use run_code to verify calculations. Check its error field.',
+      tools: [toolset],
+    }),
+  })
 
-try {
-  for await (const event of runner.runEphemeral({
-    userId: 'user',
-    newMessage: { role: 'user', parts: [{ text: 'Compute 1234567 * 89.' }] },
-    runConfig: { maxLlmCalls: 6 },
-  })) {
-    if (event.errorCode) throw new Error(`Agent failed: ${event.errorCode}`)
-    for (const part of event.content?.parts ?? []) {
-      if (part.text && !part.thought) console.log(part.text)
+  let answer = ''
+  try {
+    for await (const event of runner.runEphemeral({
+      userId,
+      newMessage: { role: 'user', parts: [{ text: question }] },
+      runConfig: { maxLlmCalls: 6 },
+    })) {
+      if (event.errorCode) throw new Error(`Agent failed: ${event.errorCode}`)
+      for (const part of event.content?.parts ?? []) {
+        if (part.text && !part.thought) answer += part.text
+      }
     }
+  } finally {
+    await toolset.close()
   }
-} finally {
-  await toolset.close()
+  return answer
 }
+
+console.log(await calculate('user', 'Compute 1234567 * 89.'))
 ```
 
-Pass the toolset itself in `tools: [toolset]` so ADK can close it. If you call `getTools()` and register individual tools instead, your application must call `close()` explicitly.
+Create the toolset, agent and runner inside the request function, as above. Concurrent calls to `calculate()` then own separate sandboxes. Pass the toolset itself in `tools: [toolset]` so ADK's `runAsync()` / `runEphemeral()` can close it. If you register individual tools from `getTools()`, your application must call `close()` explicitly.
 
 | Tool                       | Arguments                                              | Result fields besides `success`            |
 | -------------------------- | ------------------------------------------------------ | ------------------------------------------ |
@@ -82,9 +89,11 @@ const toolset = new E2BToolset({
 
 `template` selects the E2B template; omit it to use the Code Interpreter default. Custom templates must support the interpreters you intend to use. `sandboxOptions` accepts the E2B SDK's creation options except `template`. Unspecified network, lifecycle, environment and connection options retain the SDK defaults. Sandbox and tool timeout values use milliseconds. An operation's `timeoutMs: 0` disables its SDK execution deadline; the sandbox TTL still applies.
 
-Creation, operations and teardown are serialized per instance. Active SDK operations refresh the sandbox TTL, including a heartbeat for operations longer than the TTL. The adapter does not silently replace an expired sandbox with an empty one. An explicit `close()` followed by another use creates a new workspace; a failed `close()` retains the handle so cleanup can be retried.
+Creation, operations and teardown are serialized per instance. Active SDK operations refresh the sandbox TTL, including a heartbeat for operations longer than the TTL. The adapter does not silently replace an expired sandbox with an empty one. After successful `close()`, a new invocation can create a new workspace; late calls from the closed invocation are rejected. If cleanup fails, the handle is retained for retry and sandbox operations are blocked until `close()` succeeds. Keep the explicit `finally` cleanup: ADK 2.1.0 suppresses automatic toolset cleanup errors, whereas an explicit `close()` reports a safe error to your application.
 
-ADK 2.1.0 closes registered toolsets at the end of each runner invocation, including errors and cancellation. Files, kernel state and background processes are shared only within that invocation. A preview URL is syntactic, has `readiness: "unknown"`, and stops working when the sandbox closes. Use a separate toolset for each concurrent run or user; do not share a global instance between concurrent runner invocations. Finish consuming or explicitly close a runner's async iterator so its `finally` cleanup runs.
+ADK 2.1.0 closes registered toolsets at the end of `runAsync()` / `runEphemeral()`, including errors and cancellation. `runLive()` does not automatically close toolsets; always call `close()` in `finally` for that mode. Files, kernel state and background processes are shared within a single invocation. A preview URL is syntactic, has `readiness: "unknown"`, and stops working when the sandbox closes. Finish consuming or explicitly close a runner's async iterator so its `finally` cleanup runs.
+
+Overlapping invocations must use separate toolsets, even within the same user session. Detecting an overlap permanently invalidates the shared instance; subsequent discovery or tool calls fail, and `close()` still releases its sandbox. Because ADK calls `close()` without identifying the invocation, a competing runner's cleanup can interrupt the original run. This guard prevents cross-invocation access and silent workspace recreation; it does not make shared concurrent use supported. Create a new toolset after such a conflict.
 
 The adapter does not log tool arguments or SDK error bodies. Configure ADK and SDK tracing separately if your application handles sensitive inputs.
 
