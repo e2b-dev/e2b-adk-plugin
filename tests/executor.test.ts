@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CodeExecutionLanguage as Language } from '@google/adk'
+import { TimeoutError } from '@e2b/code-interpreter'
 import { E2BCodeExecutor } from '../src/index.js'
 import { context, execution, mockSandbox } from './helpers.js'
 
@@ -18,7 +19,11 @@ describe('code executor', () => {
         codeExecutionInput: { code: 'code', language, inputFiles: [] },
       }),
     ).toEqual({ stdout: 'hello\n\n42', stderr: '', outputFiles: [] })
-    expect(sandbox.runCode).toHaveBeenCalledWith('code', { language: expected })
+    expect(sandbox.runCode).toHaveBeenCalledWith('code', {
+      context: { id: `ctx-${expected}`, language: expected, cwd: '/home/user' },
+      envs: undefined,
+      timeoutMs: 65_000,
+    })
     await executor.close()
   })
 
@@ -93,6 +98,33 @@ describe('code executor', () => {
     await executor.close()
     await executor.close()
     expect(sandbox.kill).toHaveBeenCalledTimes(1)
+    // close() is not terminal: a later call starts a new workspace.
+    await executor.executeCode({
+      invocationContext: context(),
+      codeExecutionInput: input,
+    })
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds execution and restarts the kernel after a timeout', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.runCode.mockRejectedValueOnce(new TimeoutError('timed out'))
+    const executor = new E2BCodeExecutor({ maxOperationMs: 5000 })
+    const result = await executor.executeCode({
+      invocationContext: context(),
+      codeExecutionInput: {
+        code: 'x',
+        language: Language.PYTHON,
+        inputFiles: [],
+      },
+    })
+    expect(result.stderr).toBe(
+      'Execution exceeded 5000 ms. The kernel was restarted; its variables and imports were lost.',
+    )
+    expect(sandbox.runCode.mock.calls[0]![1]).toMatchObject({
+      timeoutMs: 10_000,
+    })
+    expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
   })
 
   it('normalizes runtime errors and truncates all output fields', async () => {

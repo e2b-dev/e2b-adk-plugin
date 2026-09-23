@@ -6,5 +6,9 @@ export interface E2BSandboxOptions {
   sandboxOptions?: Omit<SandboxOpts, 'template'>
 }
 
-export type E2BCodeExecutorOptions = E2BSandboxOptions
-export type E2BToolsetOptions = E2BSandboxOptions
+export interface E2BToolsetOptions extends E2BSandboxOptions {
+  /** Longest a single code or command execution may run, in milliseconds. Default 600_000. */
+  maxOperationMs?: number
+}
+
+export type E2BCodeExecutorOptions = E2BToolsetOptions

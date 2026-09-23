@@ -2,29 +2,39 @@ import {
   BaseToolset,
   FunctionTool,
   type BaseTool,
+  type Session,
   type ToolOptions,
-  type InvocationContext,
-  type ReadonlyContext,
 } from '@google/adk'
-import { CommandExitError } from '@e2b/code-interpreter'
 import { z } from 'zod'
 import type { E2BToolsetOptions } from './options.js'
-import { failure, operationError, truncate } from './results.js'
-import { SandboxManager } from './sandbox-manager.js'
+import {
+  failure,
+  OperationAbortedError,
+  operationError,
+  SandboxCleanupError,
+  truncate,
+  WorkspaceExpiredError,
+} from './results.js'
+import { operationLimit, Workspace, type RunInfo } from './workspace.js'
+
+/** SDK default for code and command execution when the model sets no limit. */
+const DEFAULT_TIMEOUT_MS = 60_000
+const CLEANUP_HINT =
+  'The application must retry destroySession() before this workspace can be used.'
+
+type SessionRef = Pick<Session, 'appName' | 'userId' | 'id'>
+type Execute<T extends z.ZodObject> = (
+  input: z.infer<T>,
+  workspace: Workspace,
+  info: RunInfo,
+  signal?: AbortSignal,
+) => Promise<Record<string, unknown>>
 
 const path = z.string().min(1).describe('Path inside the sandbox.')
 const envs = z
   .record(z.string(), z.string())
   .optional()
   .describe('Environment variables for this operation only.')
-const timeoutMs = z
-  .number()
-  .int()
-  .nonnegative()
-  .optional()
-  .describe(
-    'Execution timeout in milliseconds. Zero disables the SDK execution timeout.',
-  )
 const command = {
   command: z
     .string()
@@ -36,7 +46,6 @@ const command = {
     .optional()
     .describe('Working directory inside the sandbox.'),
   envs,
-  timeoutMs,
 }
 
 /** Convert validation failures as well as execution failures into tool responses. */
@@ -52,26 +61,31 @@ class SafeFunctionTool<T extends z.ZodObject> extends FunctionTool<T> {
   }
 }
 
-/** Six agent-callable tools sharing a sandbox until the runner closes the toolset. */
-export class E2BToolset extends BaseToolset {
-  private readonly manager: SandboxManager
-  private readonly tools: BaseTool[]
-  private owner?: string
-  private conflicted = false
-  private readonly activeSessions = new Set<InvocationContext['session']>()
-  private activeInvocationId?: string
-  private readonly closedInvocations = new WeakMap<
-    InvocationContext['session'],
-    Set<string>
-  >()
+const key = ({ appName, userId, id }: SessionRef) =>
+  JSON.stringify([appName, userId, id])
 
-  constructor(options: E2BToolsetOptions = {}) {
+/**
+ * Six agent-callable tools. Each ADK session gets its own lazily created
+ * sandbox, kept until the application calls destroySession()/destroyAll() or
+ * the sandbox timeout releases it. ADK's automatic close() leaves it running.
+ */
+export class E2BToolset extends BaseToolset {
+  private readonly workspaces = new Map<string, Workspace>()
+  private readonly tools: BaseTool[]
+
+  constructor(private readonly options: E2BToolsetOptions = {}) {
     super([])
-    this.manager = new SandboxManager(options)
+    const max = operationLimit(options)
+    const limit = z.number().int().min(1).max(max).optional()
+    const timeoutMs = limit.describe(
+      `Execution limit in milliseconds, 1 to ${max}. Defaults to ${Math.min(DEFAULT_TIMEOUT_MS, max)}.`,
+    )
+    const deadline = (value?: number) =>
+      value ?? Math.min(DEFAULT_TIMEOUT_MS, max)
     this.tools = [
       this.tool(
         'run_code',
-        'Execute code in a stateful E2B kernel. Returns stdout, stderr, the last expression text and runtime errors. Defaults to Python.',
+        'Execute code in a stateful kernel, one per language, shared by the whole conversation while its workspace lives. Returns stdout, stderr, the last expression text and runtime errors. Defaults to Python.',
         z.object({
           code: z.string().min(1),
           language: z
@@ -80,193 +94,240 @@ export class E2BToolset extends BaseToolset {
           envs,
           timeoutMs,
         }),
-        (input) =>
-          this.manager.run(async (sandbox) => {
-            const result = await sandbox.runCode(input.code, {
-              language: input.language,
-              envs: input.envs,
-              timeoutMs: input.timeoutMs,
-            })
-            return {
-              success: true,
-              stdout: truncate(result.logs.stdout.join('')),
-              stderr: truncate(result.logs.stderr.join('')),
-              text: truncate(result.text ?? ''),
-              error: result.error
-                ? truncate(
-                    `${result.error.name}: ${result.error.value}\n${result.error.traceback}`,
-                  )
-                : '',
-            }
-          }),
+        async (input, workspace, info, signal) => {
+          const ms = deadline(input.timeoutMs)
+          const outcome = await workspace.runCode(
+            input.code,
+            input.language,
+            input.envs,
+            info,
+            { signal, timeoutMs: ms },
+          )
+          if ('stopped' in outcome) {
+            const why =
+              outcome.stopped === 'timed_out'
+                ? `exceeded ${ms} ms`
+                : 'was cancelled'
+            return failure(
+              `Execution ${why}. The ${input.language} kernel was restarted; its variables and imports were lost.`,
+              { [outcome.stopped]: true, kernel_restarted: true },
+            )
+          }
+          const { execution } = outcome
+          return {
+            success: true,
+            stdout: truncate(execution.logs.stdout.join('')),
+            stderr: truncate(execution.logs.stderr.join('')),
+            text: truncate(execution.text ?? ''),
+            error: execution.error
+              ? truncate(
+                  `${execution.error.name}: ${execution.error.value}\n${execution.error.traceback}`,
+                )
+              : '',
+          }
+        },
       ),
       this.tool(
         'run_command',
-        'Run a shell command and return stdout, stderr and exit_code. Each command starts a new process; cwd and envs do not persist.',
-        z.object(command),
-        (input) =>
-          this.manager.run(async (sandbox) => {
-            try {
-              const result = await sandbox.commands.run(input.command, {
-                cwd: input.cwd,
-                envs: input.envs,
-                timeoutMs: input.timeoutMs,
-              })
-              return {
-                success: true,
-                stdout: truncate(result.stdout),
-                stderr: truncate(result.stderr),
-                exit_code: result.exitCode,
-              }
-            } catch (error) {
-              if (!(error instanceof CommandExitError)) throw error
-              return {
-                success: true,
-                stdout: truncate(error.stdout),
-                stderr: truncate(error.stderr),
-                exit_code: error.exitCode,
-              }
-            }
-          }),
+        'Run a shell command and return stdout, stderr and exit_code. Each command starts a new process; cwd and envs do not persist, files do.',
+        z.object({ ...command, timeoutMs }),
+        async (input, workspace, info, signal) => {
+          const ms = deadline(input.timeoutMs)
+          const outcome = await workspace.runCommand(
+            input.command,
+            { cwd: input.cwd, envs: input.envs },
+            info,
+            { signal, timeoutMs: ms },
+          )
+          if ('stopped' in outcome) {
+            const why =
+              outcome.stopped === 'timed_out'
+                ? `timed out after ${ms} ms`
+                : 'was cancelled'
+            return failure(
+              `Command ${why}; it and its child processes were killed.`,
+              {
+                [outcome.stopped]: true,
+                stdout: truncate(outcome.stdout),
+                stderr: truncate(outcome.stderr),
+              },
+            )
+          }
+          return {
+            success: true,
+            stdout: truncate(outcome.result.stdout),
+            stderr: truncate(outcome.result.stderr),
+            exit_code: outcome.result.exitCode,
+          }
+        },
       ),
       this.tool(
         'write_file',
         'Write a UTF-8 text file inside the sandbox. Creates parent directories.',
         z.object({ path, content: z.string() }),
-        (input) =>
-          this.manager.run(async (sandbox) => {
-            await sandbox.files.write(input.path, input.content)
-            return { success: true, path: input.path }
-          }),
+        (input, workspace, info, signal) =>
+          workspace.run(
+            async (sandbox) => {
+              await sandbox.files.write(input.path, input.content)
+              return { success: true, path: input.path }
+            },
+            info,
+            signal,
+          ),
       ),
       this.tool(
         'read_file',
         'Read a UTF-8 text file from the sandbox. Large content is truncated.',
         z.object({ path }),
-        (input) =>
-          this.manager.run(async (sandbox) => ({
-            success: true,
-            path: input.path,
-            content: truncate(await sandbox.files.read(input.path)),
-          })),
+        (input, workspace, info, signal) =>
+          workspace.run(
+            async (sandbox) => ({
+              success: true,
+              path: input.path,
+              content: truncate(await sandbox.files.read(input.path)),
+            }),
+            info,
+            signal,
+          ),
       ),
       this.tool(
         'list_files',
         'List entries in a sandbox directory.',
         z.object({ path: path.default('.') }),
-        (input) =>
-          this.manager.run(async (sandbox) => {
-            const entries = await sandbox.files.list(input.path)
-            return {
-              success: true,
-              entries: entries
-                .slice(0, 100)
-                .map(({ name, type }) => ({ name: truncate(name), type })),
-              truncated: entries.length > 100,
-            }
-          }),
+        (input, workspace, info, signal) =>
+          workspace.run(
+            async (sandbox) => {
+              const entries = await sandbox.files.list(input.path)
+              return {
+                success: true,
+                entries: entries
+                  .slice(0, 100)
+                  .map(({ name, type }) => ({ name: truncate(name), type })),
+                truncated: entries.length > 100,
+              }
+            },
+            info,
+            signal,
+          ),
       ),
       this.tool(
         'start_background_command',
-        'Start a sandbox process and return its PID immediately. Optional preview URL is not checked for readiness and expires when the runner invocation ends.',
+        'Start a long-running sandbox process and return its PID immediately. It runs until it exits, timeoutMs elapses, or the workspace ends. An optional preview URL is not checked for readiness.',
         z.object({
           ...command,
+          timeoutMs: limit.describe(
+            `Optional process lifetime in milliseconds, 1 to ${max}. Omit to keep it running.`,
+          ),
           port: z.number().int().min(1).max(65535).optional(),
         }),
-        (input) =>
-          this.manager.run(async (sandbox) => {
-            const handle = await sandbox.commands.run(input.command, {
-              cwd: input.cwd,
-              envs: input.envs,
-              timeoutMs: input.timeoutMs,
-              background: true,
-            })
-            // Stop consuming the SDK event stream without killing the process.
-            await handle.disconnect()
-            let previewUrl: string | null = null
-            if (input.port !== undefined) {
-              try {
-                previewUrl = `https://${sandbox.getHost(input.port)}`
-              } catch {
-                /* Preserve the started process PID. */
+        (input, workspace, info, signal) =>
+          workspace.run(
+            async (sandbox) => {
+              const handle = await sandbox.commands.run(input.command, {
+                cwd: input.cwd,
+                envs: input.envs,
+                // The SDK default (60 s) would kill a disconnected process too.
+                timeoutMs: input.timeoutMs ?? 0,
+                background: true,
+              })
+              // Stop consuming the SDK event stream without killing the process.
+              await handle.disconnect()
+              let previewUrl: string | null = null
+              if (input.port !== undefined) {
+                try {
+                  previewUrl = `https://${sandbox.getHost(input.port)}`
+                } catch {
+                  /* Preserve the started process PID. */
+                }
               }
-            }
-            return {
-              success: true,
-              pid: handle.pid,
-              preview_url: previewUrl,
-              ...(input.port === undefined ? {} : { readiness: 'unknown' }),
-            }
-          }),
+              return {
+                success: true,
+                pid: handle.pid,
+                preview_url: previewUrl,
+                ...(input.port === undefined ? {} : { readiness: 'unknown' }),
+              }
+            },
+            info,
+            signal,
+          ),
       ),
     ]
   }
 
-  private admissionError(context?: InvocationContext): string | undefined {
-    if (!context) return 'An ADK invocation context is required.'
-    if (this.conflicted)
-      return 'This toolset was shared by overlapping invocations. Create a separate E2BToolset for each run.'
-    const { session, invocationId } = context
-    if (this.closedInvocations.get(session)?.has(invocationId)) {
-      return 'The workspace for this invocation was closed. It cannot be reopened; start a new run with a separate E2BToolset.'
+  private workspace(session: SessionRef): Workspace {
+    let workspace = this.workspaces.get(key(session))
+    if (!workspace) {
+      workspace = new Workspace(this.options, CLEANUP_HINT)
+      this.workspaces.set(key(session), workspace)
     }
-    const key = JSON.stringify([
-      session.appName,
-      session.userId,
-      session.id,
-      invocationId,
-    ])
-    if (this.owner && this.owner !== key) {
-      this.conflicted = true
-      return 'This toolset was shared by overlapping invocations. Create a separate E2BToolset for each run.'
-    }
-    this.owner = key
-    this.activeInvocationId = invocationId
-    this.activeSessions.add(session)
+    return workspace
   }
 
   private tool<T extends z.ZodObject>(
     name: string,
     description: string,
     parameters: T,
-    execute: ToolOptions<T>['execute'],
+    execute: Execute<T>,
   ): BaseTool {
     return new SafeFunctionTool({
       name,
       description,
       parameters,
-      execute: async (input, context) => {
-        const admissionError = this.admissionError(context?.invocationContext)
-        if (admissionError) return failure(admissionError)
-        try {
-          return await execute(input, context)
-        } catch (error) {
-          return failure(operationError(error))
-        }
-      },
+      execute: (async (input: z.infer<T>, context) => {
+        const invocation = context?.invocationContext
+        if (!invocation)
+          return failure('An ADK invocation context is required.')
+        const info: RunInfo = { created: false }
+        const result = await execute(
+          input,
+          this.workspace(invocation.session),
+          info,
+          invocation.abortSignal,
+        ).catch((error: unknown) =>
+          failure(operationError(error), {
+            ...(error instanceof WorkspaceExpiredError && {
+              workspace_expired: true,
+            }),
+            ...(error instanceof OperationAbortedError && { aborted: true }),
+          }),
+        )
+        return info.created ? { ...result, workspace: 'new' } : result
+      }) as ToolOptions<T>['execute'],
     })
   }
 
-  override async getTools(context?: ReadonlyContext): Promise<BaseTool[]> {
-    if (context) {
-      const error = this.admissionError(context.invocationContext)
-      if (error) throw new Error(error)
-    }
+  override async getTools(): Promise<BaseTool[]> {
     return [...this.tools]
   }
 
-  override async close(): Promise<void> {
-    // Invalidate before awaiting cleanup: ADK close() has no invocation context.
-    if (this.activeInvocationId !== undefined) {
-      for (const session of this.activeSessions) {
-        const closed = this.closedInvocations.get(session) ?? new Set<string>()
-        closed.add(this.activeInvocationId)
-        this.closedInvocations.set(session, closed)
-      }
-    }
-    this.activeSessions.clear()
-    this.owner = undefined
-    this.activeInvocationId = undefined
-    await this.manager.close()
+  /**
+   * ADK calls this after every run without saying which one ended, so it
+   * releases nothing. Use destroySession() or destroyAll().
+   */
+  override async close(): Promise<void> {}
+
+  /** Kill the session's sandbox. Later calls in that session start a new workspace. */
+  async destroySession(session: SessionRef): Promise<void> {
+    const id = key(session)
+    const workspace = this.workspaces.get(id)
+    if (!workspace) return
+    await workspace.destroy()
+    // Forget it only if no newer call has started using it meanwhile.
+    if (workspace.idle && this.workspaces.get(id) === workspace)
+      this.workspaces.delete(id)
+  }
+
+  /** Destroy every workspace, continuing past failures; failed ones stay retryable. */
+  async destroyAll(): Promise<void> {
+    const results = await Promise.allSettled(
+      [...this.workspaces.values()].map((workspace) => workspace.destroy()),
+    )
+    for (const [id, workspace] of this.workspaces)
+      if (workspace.idle) this.workspaces.delete(id)
+    const failed = results.filter((r) => r.status === 'rejected').length
+    if (failed)
+      throw new SandboxCleanupError(
+        `${failed} workspace(s) could not be destroyed; retry destroyAll().`,
+      )
   }
 }

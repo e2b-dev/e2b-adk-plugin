@@ -6,18 +6,24 @@ import {
 } from '@google/adk'
 import type { E2BCodeExecutorOptions } from './options.js'
 import { operationError, truncate } from './results.js'
-import { SandboxManager } from './sandbox-manager.js'
+import { operationLimit, Workspace } from './workspace.js'
 
 type ExecuteParams = Parameters<BaseCodeExecutor['executeCode']>[0]
 
 /** Stateful code execution in one E2B workspace, owned by one ADK session. */
 export class E2BCodeExecutor extends BaseCodeExecutor {
-  private readonly manager: SandboxManager
+  private readonly workspace: Workspace
+  private readonly timeoutMs: number
   private sessionKey?: string
 
   constructor(options: E2BCodeExecutorOptions = {}) {
     super()
-    this.manager = new SandboxManager(options)
+    // Executor calls carry no limit: keep the SDK's 60 s default, capped by maxOperationMs.
+    this.timeoutMs = Math.min(60_000, operationLimit(options))
+    this.workspace = new Workspace(
+      options,
+      'Retry close() before using this executor.',
+    )
     this.stateful = true
     // ADK's response processor currently labels extracted blocks as Python.
     this.codeBlockDelimiters = [
@@ -66,18 +72,27 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
     }
     this.sessionKey = key
     try {
-      return await this.manager.run(async (sandbox) => {
-        const execution = await sandbox.runCode(input.code, { language })
-        const text = execution.text ? `\n${execution.text}` : ''
-        const error = execution.error
-          ? `\n${execution.error.name}: ${execution.error.value}\n${execution.error.traceback}`
-          : ''
-        return {
-          stdout: truncate(execution.logs.stdout.join('') + text),
-          stderr: truncate(execution.logs.stderr.join('') + error),
-          outputFiles: [],
-        }
-      })
+      const outcome = await this.workspace.runCode(
+        input.code,
+        language,
+        undefined,
+        { created: false },
+        { signal: invocationContext.abortSignal, timeoutMs: this.timeoutMs },
+      )
+      if ('stopped' in outcome)
+        return fail(
+          `Execution ${outcome.stopped === 'timed_out' ? `exceeded ${this.timeoutMs} ms` : 'was cancelled'}. The kernel was restarted; its variables and imports were lost.`,
+        )
+      const { execution } = outcome
+      const text = execution.text ? `\n${execution.text}` : ''
+      const error = execution.error
+        ? `\n${execution.error.name}: ${execution.error.value}\n${execution.error.traceback}`
+        : ''
+      return {
+        stdout: truncate(execution.logs.stdout.join('') + text),
+        stderr: truncate(execution.logs.stderr.join('') + error),
+        outputFiles: [],
+      }
     } catch (error) {
       return fail(operationError(error))
     }
@@ -88,8 +103,8 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
     return JSON.stringify([appName, userId, id])
   }
 
-  /** Releases the workspace. The instance remains bound to its original session. */
+  /** Releases the workspace; a later call starts a new one. The instance stays bound to its original session. */
   async close(): Promise<void> {
-    await this.manager.close()
+    await this.workspace.destroy()
   }
 }
