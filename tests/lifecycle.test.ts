@@ -84,9 +84,18 @@ describe('workspace lifecycle', () => {
     )
     expect(create).toHaveBeenCalledTimes(1)
     sandbox.kill.mockRejectedValueOnce(new Error('Unavailable'))
-    await expect(manager.close()).rejects.toThrow('Unavailable')
+    await expect(manager.close()).rejects.toThrow('Retry close()')
+    const workAfterFailure = vi.fn()
+    const renewals = sandbox.setTimeout.mock.calls.length
+    await expect(manager.run(workAfterFailure)).rejects.toThrow('Retry close()')
+    expect(workAfterFailure).not.toHaveBeenCalled()
+    expect(sandbox.setTimeout).toHaveBeenCalledTimes(renewals)
+    expect(create).toHaveBeenCalledTimes(1)
     await manager.close()
     expect(sandbox.kill).toHaveBeenCalledTimes(2)
+    await manager.run(async () => undefined)
+    expect(create).toHaveBeenCalledTimes(2)
+    await manager.close()
   })
 
   it('can retry a failed creation', async () => {

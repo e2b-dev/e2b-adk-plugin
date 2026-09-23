@@ -1,6 +1,12 @@
 const OUTPUT_LIMIT = 10_000
 const TRUNCATED = '\n[truncated]'
 
+export class SandboxCleanupError extends Error {
+  constructor() {
+    super('Sandbox cleanup failed. Retry close() before using this instance.')
+  }
+}
+
 export function truncate(value: string): string {
   return value.length <= OUTPUT_LIMIT
     ? value
@@ -13,6 +19,8 @@ export function failure(error: string) {
 
 /** SDK messages may contain request bodies, environment values or credentials. */
 export function operationError(error: unknown): string {
+  if (error instanceof SandboxCleanupError)
+    return new SandboxCleanupError().message
   const name = error instanceof Error ? error.name : ''
   const category = /^[A-Za-z]{1,60}(Error|Exception)$/.test(name)
     ? ` (${name})`

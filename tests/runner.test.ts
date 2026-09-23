@@ -98,10 +98,11 @@ describe('real ADK runner integration', () => {
 
   it('closes on cancellation after tool execution', async () => {
     const { sandbox } = mockSandbox()
+    const model = new ScriptedModel([toolCall, done])
     const runner = new InMemoryRunner({
       agent: new LlmAgent({
         name: 'agent',
-        model: new ScriptedModel([toolCall, done]),
+        model,
         tools: [new E2BToolset()],
       }),
     })
@@ -119,6 +120,7 @@ describe('real ADK runner integration', () => {
       if (event.content?.parts?.some((p) => p.functionResponse)) abort.abort()
     }
     expect(sandbox.kill).toHaveBeenCalledTimes(1)
+    expect(model.requests).toHaveLength(1)
   })
 
   it('returns validation errors to the model so it can correct a call', async () => {

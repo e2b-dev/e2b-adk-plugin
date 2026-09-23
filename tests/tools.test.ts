@@ -195,6 +195,12 @@ describe('six tools', () => {
       readiness: 'unknown',
     })
     expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(sandbox.commands.run).toHaveBeenCalledWith('server', {
+      background: true,
+      timeoutMs: 0,
+      cwd: undefined,
+      envs: undefined,
+    })
     sandbox.getHost.mockImplementation(() => {
       throw new Error('host')
     })

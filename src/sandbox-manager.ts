@@ -1,11 +1,13 @@
 import { Sandbox } from '@e2b/code-interpreter'
 import type { E2BSandboxOptions } from './options.js'
+import { SandboxCleanupError } from './results.js'
 
 /** A serialized, lazy workspace. Expired workspaces are never silently replaced. */
 export class SandboxManager {
   private sandbox?: Sandbox
   private queue: Promise<unknown> = Promise.resolve()
   private readonly ttl: number
+  private cleanupFailed = false
 
   constructor(private readonly options: E2BSandboxOptions = {}) {
     // The cloud default is five minutes. Do not override creation defaults.
@@ -25,6 +27,9 @@ export class SandboxManager {
 
   run<T>(operation: (sandbox: Sandbox) => Promise<T>): Promise<T> {
     return this.enqueue(async () => {
+      if (this.cleanupFailed) {
+        throw new SandboxCleanupError()
+      }
       if (!this.sandbox) {
         this.sandbox = this.options.template
           ? await Sandbox.create(
@@ -72,8 +77,14 @@ export class SandboxManager {
     return this.enqueue(async () => {
       if (!this.sandbox) return
       // Retain the handle on failure so an explicit subsequent close can retry.
-      await this.sandbox.kill()
+      this.cleanupFailed = true
+      try {
+        await this.sandbox.kill()
+      } catch {
+        throw new SandboxCleanupError()
+      }
       this.sandbox = undefined
+      this.cleanupFailed = false
     })
   }
 }
