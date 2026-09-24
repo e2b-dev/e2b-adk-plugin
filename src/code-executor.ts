@@ -5,7 +5,7 @@ import {
   type InvocationContext,
 } from '@google/adk'
 import type { E2BCodeExecutorOptions } from './options.js'
-import { operationError, truncate } from './results.js'
+import { kernelLost, operationError, truncate } from './results.js'
 import { operationLimit, Workspace } from './workspace.js'
 
 type ExecuteParams = Parameters<BaseCodeExecutor['executeCode']>[0]
@@ -83,6 +83,7 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
         return fail(
           `Execution ${outcome.stopped === 'timed_out' ? `exceeded ${this.timeoutMs} ms` : 'was cancelled'}. ${outcome.kernelRestarted ? 'The kernel was restarted; its variables and imports were lost.' : 'The code did not run.'}`,
         )
+      if ('kernelLost' in outcome) return fail(kernelLost(language, outcome))
       const { execution } = outcome
       const text = execution.text ? `\n${execution.text}` : ''
       const error = execution.error

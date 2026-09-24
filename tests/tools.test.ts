@@ -3,6 +3,7 @@ import {
   CommandExitError,
   FileNotFoundError,
   InvalidArgumentError,
+  NotFoundError,
   SandboxNotFoundError,
 } from '@e2b/code-interpreter'
 import { Context } from '@google/adk'
@@ -238,9 +239,12 @@ describe('six tools', () => {
       code: 'raw-code',
       envs: { KEY: 'secret-key' },
     })
-    expect(result).toMatchObject({
+    expect(result).toEqual({
       success: false,
-      error: 'Sandbox operation failed.',
+      error:
+        'The connection to the python kernel was lost, so it was restarted: its variables and imports were lost. Files in the sandbox are kept.',
+      kernel_restarted: true,
+      workspace: 'new',
     })
     expect(JSON.stringify(result)).not.toMatch(
       /secret-key|raw-code|private-file/,
@@ -285,6 +289,38 @@ describe('six tools', () => {
       success: false,
       error: expect.stringContaining('destroySession()'),
     })
+  })
+
+  it('tells the model when recovery or the server lost its kernel state, without claiming files are gone', async () => {
+    const { sandbox, create } = mockSandbox()
+    const toolset = new E2BToolset()
+    await invoke(toolset, 'run_code', { code: 'x = 1' })
+    sandbox.runCode.mockRejectedValueOnce(new TypeError('terminated'))
+    expect(await invoke(toolset, 'run_code', { code: 'x' })).toEqual({
+      success: false,
+      error:
+        'The connection to the python kernel was lost (TypeError), so it was restarted: its variables and imports were lost. Files in the sandbox are kept.',
+      kernel_restarted: true,
+    })
+    sandbox.runCode.mockRejectedValueOnce(
+      new NotFoundError('context 1234 secret-path'),
+    )
+    const missing = await invoke(toolset, 'run_code', {
+      code: 'x',
+      language: 'r',
+    })
+    expect(missing).toEqual({
+      success: false,
+      error:
+        'The r kernel state is no longer available (NotFoundError); the next call starts an empty kernel. Files in the sandbox are kept.',
+      kernel_reset: true,
+    })
+    expect(JSON.stringify(missing)).not.toContain('secret-path')
+    expect(
+      await invoke(toolset, 'run_code', { code: 'x', language: 'r' }),
+    ).toMatchObject({ success: true })
+    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(3)
+    expect(create).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces sandbox expiry once, then a new workspace', async () => {

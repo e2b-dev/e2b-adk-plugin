@@ -26,7 +26,10 @@ const SDK_GRACE_MS = 5_000
 
 export type Stop = 'timed_out' | 'aborted'
 export type CodeOutcome =
-  { execution: Execution } | { stopped: Stop; kernelRestarted: boolean }
+  | { execution: Execution }
+  | { stopped: Stop; kernelRestarted: boolean }
+  /** The kernel's state is gone: restarted after a lost stream, or unknown to the server. */
+  | { kernelLost: 'restarted' | 'missing'; cause: unknown }
 export type CommandOutcome =
   { result: CommandResult } | { stopped: Stop; stdout: string; stderr: string }
 
@@ -318,11 +321,11 @@ export class Workspace {
               ) {
                 // The kernel server no longer knows this context.
                 current.contexts.delete(language)
-                throw error
+                return { kernelLost: 'missing', cause: error }
               }
               // The stream broke, not necessarily the code: stop it first.
               await this.restart(sandbox, current, context, language)
-              throw error
+              return { kernelLost: 'restarted', cause: error }
             }
             // A timed-out kernel stays busy; only a restart stops the code.
             await this.restart(sandbox, current, context, language)

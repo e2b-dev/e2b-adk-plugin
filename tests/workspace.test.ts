@@ -664,9 +664,9 @@ describe('uncertain SDK outcomes', () => {
     const { sandbox } = mockSandbox()
     sandbox.runCode.mockRejectedValueOnce(new Error('connection reset'))
     const ws = workspace()
-    await expect(
-      ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
-    ).rejects.toThrow('connection reset')
+    expect(
+      await ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).toEqual({ kernelLost: 'restarted', cause: new Error('connection reset') })
     expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
     expect(
       await ws.runCode('y', 'python', undefined, info(), { timeoutMs: 1000 }),
@@ -686,33 +686,29 @@ describe('uncertain SDK outcomes', () => {
     )
   })
 
-  it.each([
-    ['a local argument error', () => new InvalidArgumentError('bad')],
-    ['a missing code context', () => new NotFoundError('context missing')],
-  ])(
-    'does not restart or block after %s before the code ran',
-    async (_, error) => {
-      const { sandbox } = mockSandbox()
-      sandbox.runCode.mockRejectedValueOnce(error())
-      const ws = workspace()
-      await expect(
-        ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
-      ).rejects.toThrow()
-      expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
-      expect(
-        await ws.runCode('y', 'python', undefined, info(), { timeoutMs: 1000 }),
-      ).toHaveProperty('execution')
-    },
-  )
+  it('does not restart or block after a local argument error', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.runCode.mockRejectedValueOnce(new InvalidArgumentError('bad'))
+    const ws = workspace()
+    await expect(
+      ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).rejects.toBeInstanceOf(InvalidArgumentError)
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+    expect(
+      await ws.runCode('y', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).toHaveProperty('execution')
+  })
 
   it('forgets a code context the kernel server no longer knows', async () => {
     const { sandbox } = mockSandbox()
     const ws = workspace()
     await ws.runCode('a', 'python', undefined, info(), { timeoutMs: 1000 })
-    sandbox.runCode.mockRejectedValueOnce(new NotFoundError('context missing'))
-    await expect(
-      ws.runCode('b', 'python', undefined, info(), { timeoutMs: 1000 }),
-    ).rejects.toBeInstanceOf(NotFoundError)
+    const missing = new NotFoundError('context missing')
+    sandbox.runCode.mockRejectedValueOnce(missing)
+    expect(
+      await ws.runCode('b', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).toEqual({ kernelLost: 'missing', cause: missing })
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
     await ws.runCode('c', 'python', undefined, info(), { timeoutMs: 1000 })
     expect(sandbox.createCodeContext).toHaveBeenCalledTimes(2)
   })

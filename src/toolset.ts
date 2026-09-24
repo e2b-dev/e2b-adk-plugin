@@ -9,6 +9,7 @@ import { z } from 'zod'
 import type { E2BToolsetOptions } from './options.js'
 import {
   failure,
+  kernelLost,
   OperationAbortedError,
   operationError,
   SandboxCleanupError,
@@ -118,6 +119,13 @@ export class E2BToolset extends BaseToolset {
                   { [outcome.stopped]: true },
                 )
           }
+          if ('kernelLost' in outcome)
+            return failure(
+              kernelLost(input.language, outcome),
+              outcome.kernelLost === 'restarted'
+                ? { kernel_restarted: true }
+                : { kernel_reset: true },
+            )
           const { execution } = outcome
           return {
             success: true,

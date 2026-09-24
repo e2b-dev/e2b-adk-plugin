@@ -42,6 +42,12 @@ export function failure(error: string, fields: Record<string, unknown> = {}) {
   return { success: false as const, error, ...fields }
 }
 
+/** The error's class name if it looks like one, never its message. */
+export function errorName(error: unknown): string {
+  const name = error instanceof Error ? error.name : ''
+  return /^[A-Za-z]{1,60}(Error|Exception)$/.test(name) ? name : ''
+}
+
 /** Adapter errors carry safe text; SDK messages may contain bodies or credentials. */
 export function operationError(error: unknown): string {
   if (
@@ -52,9 +58,18 @@ export function operationError(error: unknown): string {
     error instanceof OperationAbortedError
   )
     return error.message
-  const name = error instanceof Error ? error.name : ''
-  const category = /^[A-Za-z]{1,60}(Error|Exception)$/.test(name)
-    ? ` (${name})`
-    : ''
-  return `Sandbox operation failed${category}.`
+  const name = errorName(error)
+  return `Sandbox operation failed${name ? ` (${name})` : ''}.`
+}
+
+/** Tell the caller its kernel state is gone; the sandbox's files are not. */
+export function kernelLost(
+  language: string,
+  outcome: { kernelLost: 'restarted' | 'missing'; cause: unknown },
+): string {
+  const name = errorName(outcome.cause)
+  const cause = name ? ` (${name})` : ''
+  return outcome.kernelLost === 'restarted'
+    ? `The connection to the ${language} kernel was lost${cause}, so it was restarted: its variables and imports were lost. Files in the sandbox are kept.`
+    : `The ${language} kernel state is no longer available${cause}; the next call starts an empty kernel. Files in the sandbox are kept.`
 }

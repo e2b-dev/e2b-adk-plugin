@@ -106,6 +106,23 @@ describe('code executor', () => {
     expect(create).toHaveBeenCalledTimes(2)
   })
 
+  it('reports kernel state lost by stream recovery in stderr', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.runCode.mockRejectedValueOnce(new TypeError('terminated'))
+    const result = await new E2BCodeExecutor().executeCode({
+      invocationContext: context(),
+      codeExecutionInput: {
+        code: 'x',
+        language: Language.PYTHON,
+        inputFiles: [],
+      },
+    })
+    expect(result.stderr).toBe(
+      'The connection to the python kernel was lost (TypeError), so it was restarted: its variables and imports were lost. Files in the sandbox are kept.',
+    )
+    expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
+  })
+
   it('bounds execution and restarts the kernel after a timeout', async () => {
     const { sandbox } = mockSandbox()
     sandbox.runCode.mockRejectedValueOnce(new TimeoutError('timed out'))
