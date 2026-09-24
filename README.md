@@ -2,6 +2,8 @@
 
 Give [Google ADK](https://github.com/google/adk-js) agents code, shell, file and background-process tools in an isolated [E2B](https://e2b.dev) sandbox. `E2BToolset` gives each ADK session its own lazily created workspace, which persists across the messages of that conversation until your application releases it or the sandbox times out.
 
+> **Single process only.** Workspaces are tracked in the memory of one `E2BToolset` instance. If several server instances handle one conversation (for example Cloud Run with more than one instance, where session affinity is only best effort), a later message can reach an instance that does not know the session's sandbox; it then starts an empty one, and the earlier files and variables are no longer available to the agent.
+
 ## Install
 
 Requires Node.js 22 or later and an ESM project (`"type": "module"` in `package.json`). Tested with Google ADK 2.1.0.
@@ -78,7 +80,9 @@ One `E2BToolset` can serve a module-level agent, the pattern `adk web` and `adk 
 
 ADK `close()` does not release session workspaces: ADK 2.1.0 calls it after every `runAsync()` without saying which run ended. The application owns cleanup through `destroySession(session)` and `destroyAll()`; the sandbox timeout remains the fallback. `destroySession()` kills the session's sandbox (waiting for one that is still being created), fails its pending operations without recreating anything, and lets later messages in that session start a new workspace. If a kill fails, the call rejects, the workspace stays blocked, and a later `destroySession()` or `destroyAll()` retries. `destroyAll()` attempts every workspace before reporting failures; use it on shutdown.
 
-`runEphemeral()` creates a session whose id your code never sees, so each call leaves a workspace that only `destroyAll()` or the sandbox timeout releases. Prefer `runAsync()` with sessions you create. Workspaces live in the toolset's memory: a deployment with several server processes gives each process its own workspace for the same session.
+A running sandbox is billed per second from the session's first tool call until it is destroyed or times out. Call `destroySession()` when a conversation ends; otherwise the idle timeout (five minutes by default) after the last message is billed as well.
+
+`runEphemeral()` creates a session whose id your code never sees, so each call leaves a workspace that only `destroyAll()` or the sandbox timeout releases. Prefer `runAsync()` with sessions you create.
 
 ## Configuration and limits
 
@@ -95,7 +99,7 @@ const toolset = new E2BToolset({
 })
 ```
 
-`template` selects the E2B template; omit it to use the Code Interpreter default. Custom templates must support the interpreters you intend to use and provide util-linux `setsid`. `sandboxOptions` accepts the E2B SDK's creation options except `template`; unspecified options keep the SDK defaults, so an idle sandbox is killed after five minutes. With `lifecycle: { onTimeout: 'pause' }` an idle sandbox is paused instead, and the next tool call in that session resumes it with its files and kernel state. Paused sandboxes are kept until destroyed, so release finished sessions.
+`template` selects the E2B template; omit it to use the Code Interpreter default. Custom templates must support the interpreters you intend to use and provide util-linux `setsid`. `sandboxOptions` accepts the E2B SDK's creation options except `template`; unspecified options keep the SDK defaults, so an idle sandbox is killed after five minutes. With `lifecycle: { onTimeout: 'pause' }` an idle sandbox is paused instead, and the next tool call in that session resumes it with its files and kernel state. Paused sandboxes are not billed and do not count toward the concurrency limit, but E2B keeps them until they are killed. Choose pause only if your application destroys finished sessions.
 
 `maxOperationMs` (default 10 minutes) bounds a single `run_code` or `run_command`. The model may pass `timeoutMs` from 1 up to that limit; omitted, it defaults to 60 seconds, as in the E2B SDK. The deadline starts when the operation starts running, not while it waits for an earlier one. When a deadline passes or the ADK run is aborted (`runAsync({ abortSignal })`), a command is killed with all its child processes and returns `timed_out` or `aborted`; code is stopped by restarting its kernel and returns `kernel_restarted: true`, because its variables are lost. The deadline also covers starting the command or kernel; code stopped before it starts reports that it did not run. If a kernel cannot be restarted, or the adapter cannot confirm that a stopped command and its process group are gone, the workspace is blocked until `destroySession()`. The same applies when the connection fails while a command starts or runs, because the command may still be running: a lost command stream is followed by a process-group kill, a lost code stream by a kernel restart (reported with `kernel_restarted: true`), and a start with an unknown outcome blocks the workspace. A start the sandbox refuses, such as a missing `cwd`, is an ordinary error the model can correct. If the kernel server no longer knows a language's context, the result has `kernel_reset: true` and the next call starts an empty kernel. Files in the sandbox are kept in both cases. `maxOperationMs` covers execution, including command and kernel start-up; creating or resuming the sandbox is bounded by the SDK's request timeout. Processes that start their own session with `setsid` escape this cleanup. Active operations keep extending the sandbox timeout.
 
