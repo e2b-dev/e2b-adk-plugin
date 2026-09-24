@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   CommandExitError,
   FileNotFoundError,
+  InvalidArgumentError,
+  NotFoundError,
+  SandboxError,
   SandboxNotFoundError,
   TimeoutError,
   type Sandbox,
@@ -588,5 +591,149 @@ describe('cleanup and deadline boundaries', () => {
     await vi.advanceTimersByTimeAsync(0)
     await ws.runCode('y', 'java', undefined, info(), { timeoutMs: 100 })
     expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('uncertain SDK outcomes', () => {
+  const invalidCwd = () =>
+    new InvalidArgumentError("[invalid_argument] cwd '/nope' does not exist")
+
+  it('blocks the workspace when a command start fails ambiguously', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.commands.run.mockRejectedValueOnce(new TypeError('fetch failed'))
+    const ws = workspace()
+    await expect(
+      ws.runCommand('x', {}, info(), { timeoutMs: 1000 }),
+    ).rejects.toThrow('may still be running')
+    const effect = vi.fn(async () => 1)
+    await expect(ws.run(effect, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+    expect(effect).not.toHaveBeenCalled()
+    await ws.destroy()
+    expect(await ws.run(effect, info())).toBe(1)
+  })
+
+  it('does not block after the server refuses to start a command', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.commands.run.mockRejectedValueOnce(invalidCwd())
+    const ws = workspace()
+    await expect(
+      ws.runCommand('x', { cwd: '/nope' }, info(), { timeoutMs: 1000 }),
+    ).rejects.toBeInstanceOf(InvalidArgumentError)
+    expect(
+      await ws.runCommand('x', { cwd: '/tmp' }, info(), { timeoutMs: 1000 }),
+    ).toHaveProperty('result')
+  })
+
+  it('stops the group when an established command stream is lost, then reports the failure', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.handle.wait.mockRejectedValue(new SandboxError('stream lost'))
+    const ws = workspace()
+    await expect(
+      ws.runCommand('x', {}, info(), { timeoutMs: 1000 }),
+    ).rejects.toThrow('stream lost')
+    expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
+    sandbox.handle.wait.mockResolvedValue({
+      stdout: 'ok',
+      stderr: '',
+      exitCode: 0,
+    })
+    expect(
+      await ws.runCommand('y', {}, info(), { timeoutMs: 1000 }),
+    ).toHaveProperty('result')
+  })
+
+  it('blocks when a lost command stream cannot be followed by a confirmed stop', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.handle.wait.mockRejectedValue(new SandboxError('stream lost'))
+    sandbox.commands.run.mockImplementation(async (_command, opts) => {
+      if (opts?.background) return sandbox.handle
+      throw new TypeError('fetch failed')
+    })
+    const ws = workspace()
+    await expect(
+      ws.runCommand('x', {}, info(), { timeoutMs: 1000 }),
+    ).rejects.toBeInstanceOf(WorkspaceBlockedError)
+    await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+  })
+
+  it('restarts the kernel when a code stream is lost, then reports the failure', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.runCode.mockRejectedValueOnce(new Error('connection reset'))
+    const ws = workspace()
+    await expect(
+      ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).rejects.toThrow('connection reset')
+    expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
+    expect(
+      await ws.runCode('y', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).toHaveProperty('execution')
+  })
+
+  it('blocks when a lost code stream cannot be followed by a kernel restart', async () => {
+    const { sandbox } = mockSandbox()
+    sandbox.runCode.mockRejectedValueOnce(new Error('connection reset'))
+    sandbox.restartCodeContext.mockRejectedValueOnce(new Error('down'))
+    const ws = workspace()
+    await expect(
+      ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).rejects.toBeInstanceOf(WorkspaceBlockedError)
+    await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
+  })
+
+  it.each([
+    ['a local argument error', () => new InvalidArgumentError('bad')],
+    ['a missing code context', () => new NotFoundError('context missing')],
+  ])(
+    'does not restart or block after %s before the code ran',
+    async (_, error) => {
+      const { sandbox } = mockSandbox()
+      sandbox.runCode.mockRejectedValueOnce(error())
+      const ws = workspace()
+      await expect(
+        ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 }),
+      ).rejects.toThrow()
+      expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+      expect(
+        await ws.runCode('y', 'python', undefined, info(), { timeoutMs: 1000 }),
+      ).toHaveProperty('execution')
+    },
+  )
+
+  it('forgets a code context the kernel server no longer knows', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    await ws.runCode('a', 'python', undefined, info(), { timeoutMs: 1000 })
+    sandbox.runCode.mockRejectedValueOnce(new NotFoundError('context missing'))
+    await expect(
+      ws.runCode('b', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).rejects.toBeInstanceOf(NotFoundError)
+    await ws.runCode('c', 'python', undefined, info(), { timeoutMs: 1000 })
+    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(2)
+  })
+
+  it('applies the same start rule to background commands', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    sandbox.commands.run.mockRejectedValueOnce(invalidCwd())
+    await expect(
+      ws.startBackground('server', { cwd: '/nope' }, undefined, info()),
+    ).rejects.toBeInstanceOf(InvalidArgumentError)
+    expect(
+      await ws.startBackground('server', {}, undefined, info()),
+    ).toMatchObject({ pid: 101 })
+    expect(sandbox.handle.disconnect).toHaveBeenCalledTimes(1)
+    sandbox.commands.run.mockRejectedValueOnce(new TypeError('fetch failed'))
+    await expect(
+      ws.startBackground('server', {}, undefined, info()),
+    ).rejects.toBeInstanceOf(WorkspaceBlockedError)
+    await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceBlockedError,
+    )
   })
 })

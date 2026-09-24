@@ -225,36 +225,29 @@ export class E2BToolset extends BaseToolset {
           ),
           port: z.number().int().min(1).max(65535).optional(),
         }),
-        (input, workspace, info, signal) =>
-          workspace.run(
-            async (sandbox) => {
-              const handle = await sandbox.commands.run(input.command, {
-                cwd: input.cwd,
-                envs: input.envs,
-                // The SDK default (60 s) would kill a disconnected process too.
-                timeoutMs: input.timeoutMs ?? 0,
-                background: true,
-              })
-              // Stop consuming the SDK event stream without killing the process.
-              await handle.disconnect()
-              let previewUrl: string | null = null
-              if (input.port !== undefined) {
-                try {
-                  previewUrl = `https://${sandbox.getHost(input.port)}`
-                } catch {
-                  /* Preserve the started process PID. */
-                }
-              }
-              return {
-                success: true,
-                pid: handle.pid,
-                preview_url: previewUrl,
-                ...(input.port === undefined ? {} : { readiness: 'unknown' }),
-              }
-            },
+        async (input, workspace, info, signal) => {
+          const started = await workspace.startBackground(
+            input.command,
+            { cwd: input.cwd, envs: input.envs },
+            input.timeoutMs,
             info,
             signal,
-          ),
+          )
+          let previewUrl: string | null = null
+          if (input.port !== undefined) {
+            try {
+              previewUrl = `https://${started.host(input.port)}`
+            } catch {
+              /* Preserve the started process PID. */
+            }
+          }
+          return {
+            success: true,
+            pid: started.pid,
+            preview_url: previewUrl,
+            ...(input.port === undefined ? {} : { readiness: 'unknown' }),
+          }
+        },
       ),
     ]
   }

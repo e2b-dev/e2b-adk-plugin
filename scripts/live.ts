@@ -128,6 +128,24 @@ async function directTools() {
     [exit.stdout, exit.stderr, exit.exit_code],
     ['shell ok', 'err\n', 7],
   )
+  // A start the sandbox refuses is an ordinary, correctable error.
+  for (const name of ['run_command', 'start_background_command']) {
+    const refused = await client(toolset).raw(
+      name,
+      { command: 'pwd', cwd: '/does/not/exist' },
+      ctx,
+    )
+    assert.equal(
+      refused.error,
+      'Sandbox operation failed (InvalidArgumentError).',
+      JSON.stringify(refused),
+    )
+  }
+  assert.equal(
+    (await call('run_command', { command: 'pwd', cwd: '/tmp' }, ctx)).stdout,
+    '/tmp\n',
+  )
+  console.log('PASS a refused start (missing cwd) does not block the workspace')
   const samples: Record<string, [string, string]> = {
     python: ['v = 6 * 7', 'print(v)'],
     javascript: ['var v = 6 * 7', 'console.log(v)'],

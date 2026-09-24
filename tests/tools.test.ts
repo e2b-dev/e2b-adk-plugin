@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   CommandExitError,
   FileNotFoundError,
+  InvalidArgumentError,
   SandboxNotFoundError,
 } from '@e2b/code-interpreter'
 import { Context } from '@google/adk'
@@ -255,6 +256,35 @@ describe('six tools', () => {
     expect(log).not.toHaveBeenCalled()
     expect(debug).not.toHaveBeenCalled()
     expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('lets the model correct a refused command, but blocks after an ambiguous start', async () => {
+    const { sandbox } = mockSandbox()
+    const toolset = new E2BToolset()
+    sandbox.commands.run.mockRejectedValueOnce(
+      new InvalidArgumentError("[invalid_argument] cwd '/nope' does not exist"),
+    )
+    expect(
+      await invoke(toolset, 'run_command', { command: 'ls', cwd: '/nope' }),
+    ).toEqual({
+      success: false,
+      error: 'Sandbox operation failed (InvalidArgumentError).',
+      workspace: 'new',
+    })
+    expect(
+      await invoke(toolset, 'run_command', { command: 'ls', cwd: '/tmp' }),
+    ).toMatchObject({ success: true })
+    sandbox.commands.run.mockRejectedValueOnce(new TypeError('fetch failed'))
+    expect(
+      await invoke(toolset, 'run_command', { command: 'ls' }),
+    ).toMatchObject({
+      success: false,
+      error: expect.stringContaining('may still be running'),
+    })
+    expect(await invoke(toolset, 'read_file', { path: '/a' })).toMatchObject({
+      success: false,
+      error: expect.stringContaining('destroySession()'),
+    })
   })
 
   it('surfaces sandbox expiry once, then a new workspace', async () => {

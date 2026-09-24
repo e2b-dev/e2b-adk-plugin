@@ -1,5 +1,7 @@
 import {
   CommandExitError,
+  InvalidArgumentError,
+  NotFoundError,
   Sandbox,
   SandboxNotFoundError,
   TimeoutError,
@@ -55,6 +57,9 @@ export function operationLimit(options: E2BToolsetOptions): number {
     throw new Error('maxOperationMs must be a positive integer.')
   return max
 }
+
+/** The server refused before creating a process (verified live for a bad cwd). */
+const refusedToStart = (error: unknown) => error instanceof InvalidArgumentError
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`
 
@@ -304,19 +309,23 @@ export class Workspace {
             const reason =
               stop.reason ??
               (error instanceof TimeoutError ? 'timed_out' : undefined)
-            if (!reason) throw error
-            // A timed-out kernel stays busy; only a restart stops the code.
-            try {
-              await withTimeout(
-                sandbox.restartCodeContext(context),
-                RECOVERY_WAIT_MS,
-              )
-            } catch {
-              throw this.block(
-                current,
-                `The ${language} kernel could not be restarted after the code was stopped.`,
-              )
+            if (!reason) {
+              // Refused before the code ran: nothing to stop.
+              if (error instanceof InvalidArgumentError) throw error
+              if (
+                error instanceof NotFoundError &&
+                !(error instanceof SandboxNotFoundError)
+              ) {
+                // The kernel server no longer knows this context.
+                current.contexts.delete(language)
+                throw error
+              }
+              // The stream broke, not necessarily the code: stop it first.
+              await this.restart(sandbox, current, context, language)
+              throw error
             }
+            // A timed-out kernel stays busy; only a restart stops the code.
+            await this.restart(sandbox, current, context, language)
             // The restart closes the open stream; don't let it outlive this turn.
             await withTimeout(execution, RECOVERY_WAIT_MS).catch(
               () => undefined,
@@ -345,9 +354,11 @@ export class Workspace {
         try {
           // Own process group, so stopping the command also stops its children.
           // No abort signal here: aborting the start request leaves the process running.
-          const starting = sandbox.commands.run(
+          const starting = this.start(
+            sandbox,
+            current,
             `exec setsid -w /bin/bash -c ${quote(command)}`,
-            { ...options, background: true, timeoutMs: 0 },
+            { ...options, timeoutMs: 0 },
           )
           let handle: CommandHandle
           try {
@@ -375,6 +386,12 @@ export class Workspace {
             } catch (error) {
               if (!stop.reason) {
                 if (error instanceof CommandExitError) return { result: error }
+                // The stream broke, not necessarily the command: stop it first.
+                if (!(await this.stopGroup(sandbox, handle)))
+                  throw this.block(
+                    current,
+                    'The connection to the command was lost and it could not be confirmed stopped.',
+                  )
                 throw error
               }
             }
@@ -396,6 +413,70 @@ export class Workspace {
       info,
       signal,
     )
+  }
+
+  startBackground(
+    command: string,
+    options: { cwd?: string; envs?: Record<string, string> },
+    timeoutMs: number | undefined,
+    info: RunInfo,
+    signal?: AbortSignal,
+  ) {
+    return this.run(
+      async (sandbox, current) => {
+        // The SDK default (60 s) would kill a disconnected process too.
+        const handle = await this.start(sandbox, current, command, {
+          ...options,
+          timeoutMs: timeoutMs ?? 0,
+        })
+        // Stop consuming the SDK event stream without killing the process.
+        await handle.disconnect()
+        return {
+          pid: handle.pid,
+          host: (port: number) => sandbox.getHost(port),
+        }
+      },
+      info,
+      signal,
+    )
+  }
+
+  /** Start in the background; an ambiguous failure may leave it running. */
+  private async start(
+    sandbox: Sandbox,
+    current: Current,
+    command: string,
+    options: { cwd?: string; envs?: Record<string, string>; timeoutMs: number },
+  ): Promise<CommandHandle> {
+    try {
+      return await sandbox.commands.run(command, {
+        ...options,
+        background: true,
+      })
+    } catch (error) {
+      if (refusedToStart(error)) throw error
+      const name = error instanceof Error ? error.name : 'unknown error'
+      throw this.block(
+        current,
+        `The command start failed (${name}); it may still be running.`,
+      )
+    }
+  }
+
+  private async restart(
+    sandbox: Sandbox,
+    current: Current,
+    context: Context,
+    language: string,
+  ) {
+    try {
+      await withTimeout(sandbox.restartCodeContext(context), RECOVERY_WAIT_MS)
+    } catch {
+      throw this.block(
+        current,
+        `The ${language} kernel could not be restarted, so the code may still be running.`,
+      )
+    }
   }
 
   /** SIGKILL the command's process group; true only if it is confirmed gone. */
