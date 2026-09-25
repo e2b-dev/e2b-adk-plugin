@@ -21,6 +21,7 @@ import {
   mockSandbox,
   statefulSandboxes,
   tick,
+  type FakeSandbox,
 } from './helpers.js'
 
 afterEach(() => vi.useRealTimers())
@@ -519,16 +520,42 @@ describe('cleanup and deadline boundaries', () => {
     expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
   })
 
-  it('does not claim a kernel restart when the deadline hits before the kernel exists', async () => {
+  it('waits for an in-flight request before saying no kernel ran, and blocks if it never settles', async () => {
     vi.useFakeTimers()
     const { sandbox } = mockSandbox()
-    sandbox.runCode.mockReturnValueOnce(new Promise(() => {}))
-    sandbox.listCodeContexts.mockResolvedValueOnce([])
     const ws = workspace()
-    const run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+    // (a) the request dies after the deadline without a kernel: nothing ran
+    const dead = deferred<never>()
+    dead.promise.catch(() => undefined)
+    sandbox.runCode.mockReturnValueOnce(dead.promise)
+    sandbox.listCodeContexts.mockResolvedValue([])
+    let run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
     await vi.advanceTimersByTimeAsync(100)
+    dead.reject(new Error('never started'))
     expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: false })
     expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+    // (b) the kernel appears after the deadline: it is restarted
+    const late = deferred<never>()
+    late.promise.catch(() => undefined)
+    sandbox.runCode.mockReturnValueOnce(late.promise)
+    sandbox.listCodeContexts
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: 'ctx-java', language: 'java', cwd: '/home/user' },
+      ])
+    run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+    await vi.advanceTimersByTimeAsync(100)
+    late.reject(new Error('closed'))
+    expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: true })
+    expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
+    // (c) the request never settles: fail closed
+    sandbox.runCode.mockReturnValueOnce(new Promise(() => {}))
+    sandbox.listCodeContexts.mockResolvedValue([])
+    const blocked = ws
+      .runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+      .catch((error) => error)
+    await vi.advanceTimersByTimeAsync(31_000)
+    expect(await blocked).toBeInstanceOf(WorkspaceBlockedError)
   })
 })
 
@@ -807,5 +834,88 @@ describe('reconnect across processes', () => {
     await vi.advanceTimersByTimeAsync(100)
     expect(await run).toBeInstanceOf(WorkspaceExpiredError)
     expect(ws.idle).toBe(true)
+  })
+
+  it('never uses its own sandbox when the race check fails; a retry reconciles', async () => {
+    const { create, list, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    const a = workspace()
+    await a.run(async () => 1, info())
+    const empty = () => {
+      let done = false
+      return {
+        get hasNext() {
+          return !done
+        },
+        nextItems: async () => {
+          done = true
+          return []
+        },
+      } as unknown as ReturnType<typeof Sandbox.list>
+    }
+    list.mockImplementationOnce(empty).mockImplementationOnce(() => {
+      throw new Error('list failed')
+    })
+    const b = other()
+    await expect(b.run(async () => 1, info())).rejects.toThrow('list failed')
+    expect(boxes[1]!.kill).toHaveBeenCalledTimes(1)
+    expect(b.idle).toBe(true)
+    // The next call finds the session's sandbox, not the discarded one.
+    expect(await b.run(async (box) => box.sandboxId, info())).toBe(
+      boxes[0]!.sandboxId,
+    )
+    expect(registry.running().map((e) => e.box.sandboxId)).toEqual([
+      boxes[0]!.sandboxId,
+    ])
+  })
+
+  it('keeps a discarded sandbox blocked and retryable when its kill fails', async () => {
+    const { create, list } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    await workspace().run(async () => 1, info())
+    const factory = create.getMockImplementation()!
+    create.mockImplementationOnce(async (...args: unknown[]) => {
+      const box = (await factory(...args)) as FakeSandbox
+      box.kill.mockRejectedValueOnce(new Error('down'))
+      return box
+    })
+    const empty = () => {
+      let done = false
+      return {
+        get hasNext() {
+          return !done
+        },
+        nextItems: async () => {
+          done = true
+          return []
+        },
+      } as unknown as ReturnType<typeof Sandbox.list>
+    }
+    list.mockImplementationOnce(empty).mockImplementationOnce(() => {
+      throw new Error('list failed')
+    })
+    const b = other()
+    await expect(b.run(async () => 1, info())).rejects.toThrow(
+      'Sandbox cleanup failed',
+    )
+    expect(boxes).toHaveLength(2)
+    await expect(b.run(async () => 1, info())).rejects.toThrow('Retry destroy.')
+    await b.destroy()
+    expect(b.idle).toBe(true)
+  })
+  it('scopes the session tag by namespace so deployments on one key stay apart', async () => {
+    const { create, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    const staging = new Workspace({}, 'x', { adkNamespace: 'staging', ...tag })
+    const prod = new Workspace({}, 'x', { adkNamespace: 'prod', ...tag })
+    await staging.run(async () => 1, info())
+    const mine = info()
+    await prod.run(async () => 1, mine)
+    expect(mine.created).toBe(true)
+    expect(boxes).toHaveLength(2)
+    await prod.destroy()
+    expect(registry.running().map((e) => e.box.sandboxId)).toEqual([
+      boxes[0]!.sandboxId,
+    ])
   })
 })

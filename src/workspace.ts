@@ -280,21 +280,37 @@ export class Workspace {
     if (found) return (this.current = { sandbox: found })
     const sandbox = await this.create(epoch)
     // Two processes may have created at once; the oldest wins everywhere.
-    const [oldest] = await this.find()
+    // Until that check succeeds, our sandbox is not the session's sandbox.
+    let oldest: SandboxInfo | undefined
+    try {
+      ;[oldest] = await this.find()
+    } catch (error) {
+      await this.discard(sandbox)
+      throw error
+    }
     if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
     if (oldest && oldest.sandboxId !== sandbox.sandboxId) {
       const winner = await this.connect(oldest)
       if (epoch !== this.epoch) throw new WorkspaceDestroyedError()
       if (winner) {
-        // ponytail: best effort; if this kill fails, the loser's TTL releases it.
-        await withTimeout(sandbox.kill(), RECOVERY_WAIT_MS).catch(
-          () => undefined,
-        )
+        await this.discard(sandbox)
         return (this.current = { sandbox: winner })
       }
     }
     info.created = true
     return (this.current = { sandbox })
+  }
+
+  /** Give up a sandbox we created but must not use; keep it if the kill fails. */
+  private async discard(sandbox: Sandbox) {
+    try {
+      await withTimeout(sandbox.kill(), RECOVERY_WAIT_MS)
+    } catch {
+      // Not confirmed dead: keep the handle so destroy() retries, block reuse.
+      this.blocked = new SandboxCleanupError(this.cleanupHint)
+      throw this.blocked
+    }
+    this.current = undefined
   }
 
   private async create(epoch: number): Promise<Sandbox> {
@@ -373,12 +389,22 @@ export class Workspace {
             return { kernelLost: 'restarted', cause: error }
           }
           // A timed-out kernel stays busy; only a restart stops the code.
-          const restarted = await this.restart(sandbox, current, language)
-          // The restart closes the open stream; don't let it outlive this turn.
-          if (restarted)
+          let restarted = await this.restart(sandbox, current, language)
+          if (!restarted) {
+            // No kernel yet, but the request is in flight and may still start
+            // one. Wait for it to settle, then look again.
+            if (!(await settleWithin(execution, RECOVERY_WAIT_MS)))
+              throw await this.block(
+                current,
+                'The code could not be confirmed stopped.',
+              )
+            restarted = await this.restart(sandbox, current, language)
+          } else {
+            // The restart closes the open stream; don't let it outlive this turn.
             await withTimeout(execution, RECOVERY_WAIT_MS).catch(
               () => undefined,
             )
+          }
           return { stopped: reason, kernelRestarted: restarted }
         } finally {
           stop.dispose()

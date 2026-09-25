@@ -7,7 +7,13 @@ import {
 } from '@e2b/code-interpreter'
 import { Context } from '@google/adk'
 import { E2BToolset } from '../src/index.js'
-import { context, execution, mockSandbox, toolContext } from './helpers.js'
+import {
+  context,
+  execution,
+  mockSandbox,
+  statefulSandboxes,
+  toolContext,
+} from './helpers.js'
 
 async function invoke(
   toolset: E2BToolset,
@@ -347,6 +353,28 @@ describe('six tools', () => {
     ] as const)
       await invoke(toolset, 'list_files', {}, toolContext(context(id, user)))
     expect(create).toHaveBeenCalledTimes(3)
+  })
+
+  it('puts the namespace into the sandbox metadata used to find and destroy it', async () => {
+    const { create, registry } = mockSandbox()
+    statefulSandboxes(create)
+    const staging = new E2BToolset({ namespace: 'staging' })
+    const prod = new E2BToolset({ namespace: 'prod' })
+    await invoke(staging, 'list_files', {})
+    expect(await invoke(prod, 'list_files', {})).toMatchObject({
+      workspace: 'new',
+    })
+    expect(create).toHaveBeenCalledTimes(2)
+    expect([...registry.entries.values()].map((e) => e.metadata)).toEqual([
+      expect.objectContaining({ adkNamespace: 'staging', adkAppName: 'test' }),
+      expect.objectContaining({ adkNamespace: 'prod', adkAppName: 'test' }),
+    ])
+    await prod.destroySession({
+      appName: 'test',
+      userId: 'user',
+      id: 'session',
+    })
+    expect(registry.running()).toHaveLength(1)
   })
 
   it('requires an ADK invocation context', async () => {

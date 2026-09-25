@@ -71,7 +71,7 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
     this.workspace ??= new Workspace(
       this.options,
       'Retry close() before using this executor.',
-      sessionTag(invocationContext.session),
+      sessionTag(invocationContext.session, this.options.namespace),
     )
     try {
       const outcome = await this.workspace.runCode(

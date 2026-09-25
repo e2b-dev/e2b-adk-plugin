@@ -66,7 +66,11 @@ const key = ({ appName, userId, id }: SessionRef) =>
   JSON.stringify([appName, userId, id])
 
 /** Sandbox metadata that lets any process find a session's sandbox again. */
-export const sessionTag = ({ appName, userId, id }: SessionRef) => ({
+export const sessionTag = (
+  { appName, userId, id }: SessionRef,
+  namespace?: string,
+) => ({
+  ...(namespace !== undefined && { adkNamespace: namespace }),
   adkAppName: appName,
   adkUserId: userId,
   adkSessionId: id,
@@ -271,7 +275,11 @@ export class E2BToolset extends BaseToolset {
   private workspace(session: SessionRef): Workspace {
     let workspace = this.workspaces.get(key(session))
     if (!workspace) {
-      workspace = new Workspace(this.options, CLEANUP_HINT, sessionTag(session))
+      workspace = new Workspace(
+        this.options,
+        CLEANUP_HINT,
+        sessionTag(session, this.options.namespace),
+      )
       this.workspaces.set(key(session), workspace)
     }
     return workspace
