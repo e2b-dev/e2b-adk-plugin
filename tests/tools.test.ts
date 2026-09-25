@@ -114,9 +114,8 @@ describe('six tools', () => {
     expect(create).not.toHaveBeenCalled()
     await invoke(toolset, 'run_code', { code: 'x' })
     expect(sandbox.runCode.mock.calls[0]![1]).toMatchObject({ timeoutMs: 6000 })
-    expect(() => new E2BToolset({ maxOperationMs: 0 })).toThrow(
-      'maxOperationMs',
-    )
+    for (const maxOperationMs of [0, 2_147_483_648])
+      expect(() => new E2BToolset({ maxOperationMs })).toThrow('maxOperationMs')
     expect(() => new E2BToolset({ sandboxOptions: { timeoutMs: 0 } })).toThrow(
       'sandboxOptions.timeoutMs',
     )
@@ -360,20 +359,25 @@ describe('six tools', () => {
     statefulSandboxes(create)
     const staging = new E2BToolset({ namespace: 'staging' })
     const prod = new E2BToolset({ namespace: 'prod' })
+    const unset = new E2BToolset()
     await invoke(staging, 'list_files', {})
     expect(await invoke(prod, 'list_files', {})).toMatchObject({
       workspace: 'new',
     })
-    expect(create).toHaveBeenCalledTimes(2)
+    // Without a namespace, an instance must not find the namespaced sandboxes.
+    expect(await invoke(unset, 'list_files', {})).toMatchObject({
+      workspace: 'new',
+    })
+    expect(create).toHaveBeenCalledTimes(3)
     expect([...registry.entries.values()].map((e) => e.metadata)).toEqual([
       expect.objectContaining({ adkNamespace: 'staging', adkAppName: 'test' }),
       expect.objectContaining({ adkNamespace: 'prod', adkAppName: 'test' }),
+      expect.objectContaining({ adkNamespace: 'default', adkAppName: 'test' }),
     ])
-    await prod.destroySession({
-      appName: 'test',
-      userId: 'user',
-      id: 'session',
-    })
+    const session = { appName: 'test', userId: 'user', id: 'session' }
+    await unset.destroySession(session)
+    expect(registry.running()).toHaveLength(2)
+    await prod.destroySession(session)
     expect(registry.running()).toHaveLength(1)
   })
 

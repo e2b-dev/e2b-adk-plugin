@@ -225,22 +225,28 @@ async function stopMechanisms() {
   await stopped(ctx, '/tmp/start', 'sleep 600')
   console.log('PASS a deadline during command start kills the late process')
 
-  // ...and kernel start-up: the request was already sent, so the kernel that
-  // comes up is restarted before the result is reported.
+  // ...and kernel start-up: the request was already sent. Either the kernel
+  // that comes up is restarted, or the code finished before it was listed
+  // and its result is returned; "did not run" is never claimed.
   result = await raw(
     'run_code',
     { code: 'System.out.println(1);', language: 'java', timeoutMs: 1 },
     ctx,
   )
-  assert.equal(result.timed_out, true, JSON.stringify(result))
-  assert.equal(result.kernel_restarted, true, JSON.stringify(result))
+  assert.ok(
+    (result.timed_out === true && result.kernel_restarted === true) ||
+      (result.success === true && result.stdout === '1\n'),
+    JSON.stringify(result),
+  )
   const afterStart = await call(
     'run_code',
     { code: 'System.out.println(2);', language: 'java' },
     ctx,
   )
   assert.match(String(afterStart.stdout), /2/)
-  console.log('PASS a deadline during kernel start-up restarts the new kernel')
+  console.log(
+    'PASS a deadline during kernel start-up never claims the code did not run',
+  )
 
   const loops: Record<string, [string, string, string]> = {
     python: ['v = 1', 'while True:\n    pass', 'print(v)'],

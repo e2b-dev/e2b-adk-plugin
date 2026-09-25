@@ -137,6 +137,7 @@ describe('code executor', () => {
       codeExecutionInput: input,
     })
     expect(registry.entries.get(boxes[0]!.sandboxId)?.metadata).toEqual({
+      adkNamespace: 'default',
       adkAppName: 'test',
       adkUserId: 'user',
       adkSessionId: 'session',

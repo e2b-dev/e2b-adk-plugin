@@ -20,6 +20,8 @@ import { operationLimit, Workspace, type RunInfo } from './workspace.js'
 
 /** SDK default for code and command execution when the model sets no limit. */
 const DEFAULT_TIMEOUT_MS = 60_000
+/** Always tagged: E2B's list matches any sandbox that has the given pairs. */
+const DEFAULT_NAMESPACE = 'default'
 const CLEANUP_HINT =
   'The application must retry destroySession() before this workspace can be used.'
 
@@ -70,7 +72,7 @@ export const sessionTag = (
   { appName, userId, id }: SessionRef,
   namespace?: string,
 ) => ({
-  ...(namespace !== undefined && { adkNamespace: namespace }),
+  adkNamespace: namespace ?? DEFAULT_NAMESPACE,
   adkAppName: appName,
   adkUserId: userId,
   adkSessionId: id,
@@ -121,15 +123,10 @@ export class E2BToolset extends BaseToolset {
               outcome.stopped === 'timed_out'
                 ? `exceeded ${ms} ms`
                 : 'was cancelled'
-            return outcome.kernelRestarted
-              ? failure(
-                  `Execution ${why}. The ${input.language} kernel was restarted; its variables and imports were lost.`,
-                  { [outcome.stopped]: true, kernel_restarted: true },
-                )
-              : failure(
-                  `Execution ${why} while the ${input.language} kernel was starting; the code did not run.`,
-                  { [outcome.stopped]: true },
-                )
+            return failure(
+              `Execution ${why}. The ${input.language} kernel was restarted; its variables and imports were lost.`,
+              { [outcome.stopped]: true, kernel_restarted: true },
+            )
           }
           if ('kernelLost' in outcome)
             return failure(

@@ -520,21 +520,10 @@ describe('cleanup and deadline boundaries', () => {
     expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
   })
 
-  it('waits for an in-flight request before saying no kernel ran, and blocks if it never settles', async () => {
+  it('lets a deadline request without a kernel settle, then restarts the kernel it started', async () => {
     vi.useFakeTimers()
     const { sandbox } = mockSandbox()
     const ws = workspace()
-    // (a) the request dies after the deadline without a kernel: nothing ran
-    const dead = deferred<never>()
-    dead.promise.catch(() => undefined)
-    sandbox.runCode.mockReturnValueOnce(dead.promise)
-    sandbox.listCodeContexts.mockResolvedValue([])
-    let run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
-    await vi.advanceTimersByTimeAsync(100)
-    dead.reject(new Error('never started'))
-    expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: false })
-    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
-    // (b) the kernel appears after the deadline: it is restarted
     const late = deferred<never>()
     late.promise.catch(() => undefined)
     sandbox.runCode.mockReturnValueOnce(late.promise)
@@ -543,19 +532,65 @@ describe('cleanup and deadline boundaries', () => {
       .mockResolvedValueOnce([
         { id: 'ctx-java', language: 'java', cwd: '/home/user' },
       ])
-    run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+    const run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
     await vi.advanceTimersByTimeAsync(100)
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
     late.reject(new Error('closed'))
-    expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: true })
+    expect(await run).toEqual({ stopped: 'timed_out' })
     expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
-    // (c) the request never settles: fail closed
-    sandbox.runCode.mockReturnValueOnce(new Promise(() => {}))
+  })
+
+  it('returns the result when the code finishes while no kernel is listed', async () => {
+    vi.useFakeTimers()
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    const slow = deferred<unknown>()
+    sandbox.runCode.mockReturnValueOnce(slow.promise)
     sandbox.listCodeContexts.mockResolvedValue([])
-    const blocked = ws
-      .runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
-      .catch((error) => error)
-    await vi.advanceTimersByTimeAsync(31_000)
-    expect(await blocked).toBeInstanceOf(WorkspaceBlockedError)
+    const run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+    await vi.advanceTimersByTimeAsync(100)
+    slow.resolve({ logs: { stdout: ['1'], stderr: [] } })
+    expect(await run).toEqual({
+      execution: { logs: { stdout: ['1'], stderr: [] } },
+    })
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['dies after the deadline', 100],
+    ['never settles', 31_000],
+  ])(
+    'blocks the workspace when a deadline request without a kernel %s',
+    async (_case, wait) => {
+      vi.useFakeTimers()
+      const { sandbox } = mockSandbox()
+      const ws = workspace()
+      const request = deferred<never>()
+      request.promise.catch(() => undefined)
+      sandbox.runCode.mockReturnValueOnce(request.promise)
+      sandbox.listCodeContexts.mockResolvedValue([])
+      const run = ws
+        .runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
+        .catch((error) => error)
+      await vi.advanceTimersByTimeAsync(wait)
+      if (wait === 100) request.reject(new Error('never started'))
+      expect(await run).toBeInstanceOf(WorkspaceBlockedError)
+      expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
+      await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
+        WorkspaceBlockedError,
+      )
+    },
+  )
+
+  it('blocks the workspace when a stream breaks before any kernel is listed', async () => {
+    const { sandbox } = mockSandbox()
+    const ws = workspace()
+    sandbox.runCode.mockRejectedValueOnce(new Error('connection reset'))
+    sandbox.listCodeContexts.mockResolvedValue([])
+    await expect(
+      ws.runCode('x', 'java', undefined, info(), { timeoutMs: 1_000 }),
+    ).rejects.toBeInstanceOf(WorkspaceBlockedError)
+    expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
   })
 })
 

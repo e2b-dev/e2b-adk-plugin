@@ -12,7 +12,8 @@ export interface E2BToolsetOptions extends E2BSandboxOptions {
   /**
    * Separates the sandboxes of deployments that share one E2B API key and use
    * the same ADK app name, such as staging and production. Part of the sandbox
-   * metadata used to find, reuse and destroy a session's sandbox.
+   * metadata used to find, reuse and destroy a session's sandbox; 'default'
+   * when unset.
    */
   namespace?: string
 }

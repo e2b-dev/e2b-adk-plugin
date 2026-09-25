@@ -23,11 +23,14 @@ import {
 const RECOVERY_WAIT_MS = 30_000
 /** Lets our own deadline fire before the SDK's, so one path handles both. */
 const SDK_GRACE_MS = 5_000
+/** Longest delay setTimeout honours; larger values fire immediately. */
+const MAX_TIMER_MS = 2_147_483_647
 
 export type Stop = 'timed_out' | 'aborted'
 export type CodeOutcome =
   | { execution: Execution }
-  | { stopped: Stop; kernelRestarted: boolean }
+  /** Stopped by restarting its kernel, whose variables and imports are gone. */
+  | { stopped: Stop }
   /** The kernel's state is gone: restarted after a lost stream, or unknown to the server. */
   | { kernelLost: 'restarted' | 'missing'; cause: unknown }
 export type CommandOutcome =
@@ -55,8 +58,10 @@ export function operationLimit(options: E2BToolsetOptions): number {
       'sandboxOptions.timeoutMs must be a positive finite number.',
     )
   const max = options.maxOperationMs ?? 600_000
-  if (!Number.isSafeInteger(max) || max <= 0)
-    throw new Error('maxOperationMs must be a positive integer.')
+  if (!Number.isSafeInteger(max) || max <= 0 || max > MAX_TIMER_MS)
+    throw new Error(
+      `maxOperationMs must be an integer from 1 to ${MAX_TIMER_MS}.`,
+    )
   return max
 }
 
@@ -384,28 +389,19 @@ export class Workspace {
             if (error instanceof SandboxNotFoundError) throw error
             if (error instanceof NotFoundError)
               return { kernelLost: 'missing', cause: error }
-            // The stream broke, not necessarily the code: stop it first.
-            await this.restart(sandbox, current, language)
-            return { kernelLost: 'restarted', cause: error }
           }
-          // A timed-out kernel stays busy; only a restart stops the code.
-          let restarted = await this.restart(sandbox, current, language)
-          if (!restarted) {
-            // No kernel yet, but the request is in flight and may still start
-            // one. Wait for it to settle, then look again.
-            if (!(await settleWithin(execution, RECOVERY_WAIT_MS)))
-              throw await this.block(
-                current,
-                'The code could not be confirmed stopped.',
-              )
-            restarted = await this.restart(sandbox, current, language)
-          } else {
-            // The restart closes the open stream; don't let it outlive this turn.
-            await withTimeout(execution, RECOVERY_WAIT_MS).catch(
-              () => undefined,
-            )
-          }
-          return { stopped: reason, kernelRestarted: restarted }
+          // The request went out, whether the stream broke or the deadline
+          // passed: only a kernel restart proves the code stopped.
+          const finished = await this.stopCode(
+            execution,
+            sandbox,
+            current,
+            language,
+          )
+          if (finished) return { execution: finished }
+          return reason
+            ? { stopped: reason }
+            : { kernelLost: 'restarted', cause: error }
         } finally {
           stop.dispose()
         }
@@ -540,6 +536,30 @@ export class Workspace {
   }
 
   /** Restart the language's kernel; false if none exists yet, so nothing ran. */
+  /**
+   * Stop code whose request already went out. Restart its kernel; if none is
+   * listed yet the request may still start one, so let it settle and look
+   * again. Returns the result if the code finished meanwhile; blocks the
+   * workspace when the code cannot be confirmed stopped.
+   */
+  private async stopCode(
+    execution: Promise<Execution>,
+    sandbox: Sandbox,
+    current: Current,
+    language: string,
+  ): Promise<Execution | undefined> {
+    if (await this.restart(sandbox, current, language)) {
+      // The restart closes the open stream; don't let it outlive this turn.
+      await withTimeout(execution, RECOVERY_WAIT_MS).catch(() => undefined)
+      return undefined
+    }
+    const settled = await settleWithin(execution, RECOVERY_WAIT_MS)
+    if (settled && 'value' in settled) return settled.value
+    if (settled && (await this.restart(sandbox, current, language)))
+      return undefined
+    throw await this.block(current, 'The code could not be confirmed stopped.')
+  }
+
   private async restart(
     sandbox: Sandbox,
     current: Current,
