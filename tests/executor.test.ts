@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { CodeExecutionLanguage as Language } from '@google/adk'
 import { TimeoutError } from '@e2b/code-interpreter'
 import { E2BCodeExecutor } from '../src/index.js'
-import { context, execution, mockSandbox } from './helpers.js'
+import {
+  context,
+  execution,
+  mockSandbox,
+  statefulSandboxes,
+} from './helpers.js'
 
 describe('code executor', () => {
   it.each([
@@ -20,7 +25,7 @@ describe('code executor', () => {
       }),
     ).toEqual({ stdout: 'hello\n\n42', stderr: '', outputFiles: [] })
     expect(sandbox.runCode).toHaveBeenCalledWith('code', {
-      context: { id: `ctx-${expected}`, language: expected, cwd: '/home/user' },
+      language: expected,
       envs: undefined,
       timeoutMs: 65_000,
     })
@@ -121,6 +126,30 @@ describe('code executor', () => {
       'The connection to the python kernel was lost (TypeError), so it was restarted: its variables and imports were lost. Files in the sandbox are kept.',
     )
     expect(sandbox.restartCodeContext).toHaveBeenCalledTimes(1)
+  })
+
+  it('tags its sandbox with the session so close() also finds one created elsewhere', async () => {
+    const { create, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    const input = { code: 'x', language: Language.PYTHON, inputFiles: [] }
+    await new E2BCodeExecutor().executeCode({
+      invocationContext: context(),
+      codeExecutionInput: input,
+    })
+    expect(registry.entries.get(boxes[0]!.sandboxId)?.metadata).toEqual({
+      adkAppName: 'test',
+      adkUserId: 'user',
+      adkSessionId: 'session',
+    })
+    // A second executor (another process) reuses it, and its close() kills it.
+    const other = new E2BCodeExecutor()
+    await other.executeCode({
+      invocationContext: context(),
+      codeExecutionInput: input,
+    })
+    expect(create).toHaveBeenCalledTimes(1)
+    await other.close()
+    expect(registry.running()).toHaveLength(0)
   })
 
   it('bounds execution and restarts the kernel after a timeout', async () => {

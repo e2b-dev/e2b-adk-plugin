@@ -4,7 +4,6 @@ import {
   FileNotFoundError,
   InvalidArgumentError,
   NotFoundError,
-  SandboxNotFoundError,
 } from '@e2b/code-interpreter'
 import { Context } from '@google/adk'
 import { E2BToolset } from '../src/index.js'
@@ -62,10 +61,8 @@ describe('six tools', () => {
         workspace: 'new',
       })
       expect(await invoke(toolset, 'run_code', args)).toEqual(expected)
-      expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
-      expect(sandbox.createCodeContext).toHaveBeenCalledWith({ language })
       expect(sandbox.runCode).toHaveBeenCalledWith('code', {
-        context: { id: `ctx-${language}`, language, cwd: '/home/user' },
+        language,
         timeoutMs: 6200,
         envs: { X: '1' },
       })
@@ -319,16 +316,14 @@ describe('six tools', () => {
     expect(
       await invoke(toolset, 'run_code', { code: 'x', language: 'r' }),
     ).toMatchObject({ success: true })
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(3)
     expect(create).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces sandbox expiry once, then a new workspace', async () => {
-    const { sandbox, create } = mockSandbox()
+    const { sandbox, create, registry } = mockSandbox()
     const toolset = new E2BToolset()
     await invoke(toolset, 'write_file', { path: 'a', content: 'x' })
-    sandbox.setTimeout.mockRejectedValueOnce(new SandboxNotFoundError('gone'))
-    sandbox.connect.mockRejectedValueOnce(new SandboxNotFoundError('gone'))
+    registry.kill(sandbox.sandboxId)
     expect(await invoke(toolset, 'read_file', { path: 'a' })).toEqual({
       success: false,
       error: expect.stringContaining('expired or was deleted'),

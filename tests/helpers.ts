@@ -12,6 +12,7 @@ import {
 import {
   FileNotFoundError,
   Sandbox,
+  SandboxNotFoundError,
   type Execution,
 } from '@e2b/code-interpreter'
 
@@ -62,17 +63,24 @@ export function commandHandle(
   }
 }
 
+let nextId = 0
+
 export function fakeSandbox() {
   const handle = commandHandle()
   return {
-    sandboxId: 'fake-sandbox',
+    sandboxId: `fake-sandbox-${++nextId}`,
     handle,
     runCode: vi.fn().mockResolvedValue(execution()),
-    createCodeContext: vi.fn(async ({ language }: { language: string }) => ({
-      id: `ctx-${language}`,
-      language,
-      cwd: '/home/user',
-    })),
+    // The sandbox keeps one default kernel per language (verified live).
+    listCodeContexts: vi.fn().mockImplementation(async () =>
+      ['python', 'javascript', 'typescript', 'r', 'java', 'bash'].map(
+        (language) => ({
+          id: `ctx-${language}`,
+          language,
+          cwd: '/home/user',
+        }),
+      ),
+    ),
     restartCodeContext: vi.fn().mockResolvedValue(undefined),
     commands: {
       // Background starts return the handle; foreground calls are kill commands.
@@ -86,7 +94,6 @@ export function fakeSandbox() {
       list: vi.fn().mockResolvedValue([{ name: 'test.txt', type: 'file' }]),
     },
     getHost: vi.fn().mockReturnValue('3000-fake.e2b.app'),
-    setTimeout: vi.fn().mockResolvedValue(undefined),
     connect: vi.fn(async function (this: unknown) {
       return this
     }),
@@ -96,16 +103,133 @@ export function fakeSandbox() {
 
 export type FakeSandbox = ReturnType<typeof fakeSandbox>
 
+interface Entry {
+  box: FakeSandbox
+  metadata: Record<string, string>
+  startedAt: Date
+  state: 'running' | 'paused' | 'killed'
+}
+
+/**
+ * The E2B control plane as every "process" in a test sees it: sandboxes are
+ * listed by metadata, connected by id (resuming a paused one), and killed by
+ * id. A second toolset or workspace over the same registry is another process.
+ */
+export function registry() {
+  const entries = new Map<string, Entry>()
+  const info = (e: Entry) => ({
+    sandboxId: e.box.sandboxId,
+    metadata: e.metadata,
+    startedAt: e.startedAt,
+    state: e.state,
+  })
+  const alive = (id: string) => {
+    const e = entries.get(id)
+    return e && e.state !== 'killed' ? e : undefined
+  }
+  const reg = {
+    entries,
+    add(box: FakeSandbox, metadata: Record<string, string>) {
+      const entry: Entry = {
+        box,
+        metadata,
+        startedAt: new Date(1_700_000_000_000 + entries.size * 1000),
+        state: 'running',
+      }
+      entries.set(box.sandboxId, entry)
+      box.kill.mockImplementation(async () => {
+        const was = entry.state !== 'killed'
+        entry.state = 'killed'
+        return was
+      })
+      box.connect.mockImplementation(async () => {
+        if (entry.state === 'killed') throw new SandboxNotFoundError('gone')
+        entry.state = 'running'
+        return box
+      })
+      return entry
+    },
+    pause(id: string) {
+      alive(id)!.state = 'paused'
+    },
+    kill(id: string) {
+      const e = alive(id)
+      if (e) e.state = 'killed'
+    },
+    running: () => [...entries.values()].filter((e) => e.state === 'running'),
+    list(query?: { metadata?: Record<string, string>; state?: string[] }) {
+      const states = query?.state ?? ['running', 'paused']
+      return (
+        [...entries.values()]
+          .filter(
+            (e) =>
+              states.includes(e.state) &&
+              Object.entries(query?.metadata ?? {}).every(
+                ([k, v]) => e.metadata[k] === v,
+              ),
+          )
+          // Newest first, as the real API answers.
+          .sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime())
+          .map(info)
+      )
+    },
+    alive,
+    info,
+  }
+  return reg
+}
+
+export type Registry = ReturnType<typeof registry>
+
 export function mockSandbox() {
   const sandbox = fakeSandbox()
-  const create = vi
-    .spyOn(Sandbox, 'create')
-    .mockResolvedValue(sandbox as unknown as Sandbox)
+  const reg = registry()
+  /** Configure this to change what a create returns; the registry wraps it. */
+  const create = vi.fn().mockResolvedValue(sandbox as unknown as Sandbox)
+  vi.spyOn(Sandbox, 'create').mockImplementation(async (...args: unknown[]) => {
+    const opts = (typeof args[0] === 'string' ? args[1] : args[0]) as
+      { metadata?: Record<string, string> } | undefined
+    const box = (await create(...args)) as FakeSandbox
+    reg.add(box, opts?.metadata ?? {})
+    return box as unknown as Sandbox
+  })
+  const list = vi.spyOn(Sandbox, 'list').mockImplementation(((opts?: {
+    query?: Parameters<Registry['list']>[0]
+  }) => {
+    let done = false
+    return {
+      get hasNext() {
+        return !done
+      },
+      nextItems: async () => {
+        done = true
+        return reg.list(opts?.query)
+      },
+    }
+  }) as unknown as typeof Sandbox.list)
+  const connect = vi.spyOn(Sandbox, 'connect').mockImplementation((async (
+    id: string,
+  ) => {
+    const e = reg.alive(id)
+    if (!e) throw new SandboxNotFoundError(`${id} not found`)
+    e.state = 'running'
+    return e.box
+  }) as unknown as typeof Sandbox.connect)
+  const kill = vi.spyOn(Sandbox, 'kill').mockImplementation(async (id) => {
+    const e = reg.alive(id)
+    if (e) e.state = 'killed'
+    return Boolean(e)
+  })
+  vi.spyOn(Sandbox, 'getInfo').mockImplementation((async (id: string) => {
+    const e = reg.alive(id)
+    if (!e) throw new SandboxNotFoundError(`${id} not found`)
+    return reg.info(e)
+  }) as unknown as typeof Sandbox.getInfo)
   // Tests must never contact a model or sandbox endpoint.
   vi.spyOn(globalThis, 'fetch').mockRejectedValue(
     new Error('Network disabled in tests'),
   )
-  return { sandbox, create }
+  return { sandbox, create, registry: reg, list, connect, kill }
 }
 
 /** Every create returns a new sandbox with its own files, lost on kill. */
@@ -124,10 +248,6 @@ export function statefulSandboxes(
     box.files.read.mockImplementation(async (path: string) => {
       if (!box.data.has(path)) throw new FileNotFoundError(`${path} missing`)
       return box.data.get(path)
-    })
-    box.kill.mockImplementation(async () => {
-      box.data.clear()
-      return true
     })
     boxes.push(box)
     return box as unknown as Sandbox

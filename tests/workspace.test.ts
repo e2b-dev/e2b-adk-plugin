@@ -5,7 +5,6 @@ import {
   InvalidArgumentError,
   NotFoundError,
   SandboxError,
-  SandboxNotFoundError,
   TimeoutError,
   type Sandbox,
 } from '@e2b/code-interpreter'
@@ -16,12 +15,20 @@ import {
   WorkspaceExpiredError,
 } from '../src/results.js'
 import { Workspace } from '../src/workspace.js'
-import { deferred, execution, mockSandbox, tick } from './helpers.js'
+import {
+  deferred,
+  execution,
+  mockSandbox,
+  statefulSandboxes,
+  tick,
+} from './helpers.js'
 
 afterEach(() => vi.useRealTimers())
 
 const info = () => ({ created: false })
-const workspace = (options = {}) => new Workspace(options, 'Retry destroy.')
+const tag = { adkSessionId: 's' }
+const workspace = (options = {}) =>
+  new Workspace(options, 'Retry destroy.', tag)
 
 describe('workspace lifecycle', () => {
   it('is lazy, forwards only supplied SDK options and reports creation', async () => {
@@ -36,12 +43,16 @@ describe('workspace lifecycle', () => {
     const first = info()
     await ws.run(async () => 1, first)
     expect(first.created).toBe(true)
-    expect(create).toHaveBeenCalledWith('custom', options)
+    expect(create).toHaveBeenCalledWith('custom', {
+      ...options,
+      metadata: { adkSessionId: 's' },
+    })
     const second = info()
     await ws.run(async () => 1, second)
     expect(second.created).toBe(false)
     expect(create).toHaveBeenCalledTimes(1)
-    expect(sandbox.setTimeout).toHaveBeenCalledWith(1200)
+    // Lifetime is extended through connect(), which never shortens it.
+    expect(sandbox.connect).toHaveBeenCalledWith({ timeoutMs: 1200 })
     expect(sandbox.kill).not.toHaveBeenCalled()
   })
 
@@ -93,64 +104,22 @@ describe('workspace lifecycle', () => {
     expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
   })
 
-  it('uses one lazy code context per language and never passes language with it', async () => {
+  it('runs code in the sandbox default kernel of each language', async () => {
     const { sandbox } = mockSandbox()
     const ws = workspace()
     await ws.runCode('a', 'python', { X: '1' }, info(), { timeoutMs: 1000 })
-    await ws.runCode('b', 'python', undefined, info(), { timeoutMs: 1000 })
     await ws.runCode('c', 'r', undefined, info(), { timeoutMs: 1000 })
-    expect(sandbox.createCodeContext.mock.calls).toEqual([
-      [{ language: 'python' }],
-      [{ language: 'r' }],
-    ])
     expect(sandbox.runCode).toHaveBeenNthCalledWith(1, 'a', {
-      context: { id: 'ctx-python', language: 'python', cwd: '/home/user' },
+      language: 'python',
       envs: { X: '1' },
       timeoutMs: 6000,
     })
+    expect(sandbox.runCode).toHaveBeenNthCalledWith(2, 'c', {
+      language: 'r',
+      envs: undefined,
+      timeoutMs: 6000,
+    })
   })
-
-  it.each([
-    ['deadline', 'timed_out'],
-    ['abort', 'aborted'],
-    ['SDK timeout', 'timed_out'],
-  ])(
-    '%s during code restarts the kernel before the next call',
-    async (how, stopped) => {
-      vi.useFakeTimers()
-      const { sandbox } = mockSandbox()
-      const running = deferred<never>()
-      running.promise.catch(() => undefined)
-      sandbox.runCode.mockReturnValueOnce(running.promise)
-      // Live-verified: a restart ends the open execution stream.
-      sandbox.restartCodeContext.mockImplementation(async () =>
-        running.reject(new Error('UnexpectedEndOfExecution')),
-      )
-      const ws = workspace()
-      const abort = new AbortController()
-      const result = ws.runCode('loop', 'python', undefined, info(), {
-        timeoutMs: 1000,
-        signal: abort.signal,
-      })
-      await vi.advanceTimersByTimeAsync(10)
-      if (how === 'abort') abort.abort()
-      if (how === 'SDK timeout') running.reject(new TimeoutError('timed out'))
-      await vi.advanceTimersByTimeAsync(1000)
-      expect(await result).toEqual({ stopped, kernelRestarted: true })
-      expect(sandbox.restartCodeContext).toHaveBeenCalledWith({
-        id: 'ctx-python',
-        language: 'python',
-        cwd: '/home/user',
-      })
-      const next = ws.runCode('1', 'python', undefined, info(), {
-        timeoutMs: 1000,
-      })
-      await vi.advanceTimersByTimeAsync(0)
-      expect(await next).toHaveProperty('execution')
-      expect(vi.getTimerCount()).toBe(0)
-    },
-  )
-
   it('blocks the workspace when a kernel restart fails, until destroy recovers it', async () => {
     const { sandbox, create } = mockSandbox()
     sandbox.runCode.mockRejectedValueOnce(new TimeoutError('timed out'))
@@ -272,10 +241,10 @@ describe('workspace lifecycle', () => {
       'Sandbox cleanup failed. Retry destroy.',
     )
     const work = vi.fn()
-    const renewals = sandbox.setTimeout.mock.calls.length
+    const renewals = sandbox.connect.mock.calls.length
     await expect(ws.run(work, info())).rejects.toThrow('Retry destroy.')
     expect(work).not.toHaveBeenCalled()
-    expect(sandbox.setTimeout).toHaveBeenCalledTimes(renewals)
+    expect(sandbox.connect).toHaveBeenCalledTimes(renewals)
     expect(ws.idle).toBe(false)
     await ws.destroy()
     expect(sandbox.kill).toHaveBeenCalledTimes(2)
@@ -283,43 +252,33 @@ describe('workspace lifecycle', () => {
     expect(create).toHaveBeenCalledTimes(2)
   })
 
-  it('reports an expired sandbox once, resets code contexts, then starts a new workspace', async () => {
-    const { sandbox, create } = mockSandbox()
+  it('reports an expired sandbox once, then starts a new workspace', async () => {
+    const { sandbox, create, registry } = mockSandbox()
     const ws = workspace()
     await ws.runCode('x = 1', 'python', undefined, info(), { timeoutMs: 1000 })
-    sandbox.setTimeout.mockRejectedValueOnce(new SandboxNotFoundError('gone'))
-    sandbox.connect.mockRejectedValueOnce(new SandboxNotFoundError('gone'))
+    registry.kill(sandbox.sandboxId)
     const work = vi.fn()
     await expect(ws.run(work, info())).rejects.toBeInstanceOf(
       WorkspaceExpiredError,
     )
     expect(work).not.toHaveBeenCalled()
     const next = info()
-    await ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 })
     await ws.run(async () => 1, next)
+    expect(next.created).toBe(true)
     expect(create).toHaveBeenCalledTimes(2)
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(2)
   })
-
-  it('resumes a paused sandbox, which the control plane also reports as missing', async () => {
-    const { sandbox, create } = mockSandbox()
+  it('resumes a paused sandbox instead of replacing it', async () => {
+    const { sandbox, create, registry } = mockSandbox()
     const ws = workspace({ sandboxOptions: { timeoutMs: 1200 } })
     await ws.runCode('x = 1', 'python', undefined, info(), { timeoutMs: 1000 })
-    sandbox.setTimeout.mockRejectedValueOnce(new SandboxNotFoundError('paused'))
+    registry.pause(sandbox.sandboxId)
     const resumed = info()
     expect(await ws.run(async () => 'kept', resumed)).toBe('kept')
     expect(sandbox.connect).toHaveBeenCalledWith({ timeoutMs: 1200 })
     expect(resumed.created).toBe(false)
-    await ws.runCode('x', 'python', undefined, info(), { timeoutMs: 1000 })
-    expect(create).toHaveBeenCalledTimes(1)
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
-    sandbox.setTimeout.mockRejectedValueOnce(new SandboxNotFoundError('paused'))
-    sandbox.connect.mockRejectedValueOnce(new Error('Transient'))
-    await expect(ws.run(async () => 1, info())).rejects.toThrow('Transient')
-    expect(await ws.run(async () => 2, info())).toBe(2)
+    expect(registry.alive(sandbox.sandboxId)?.state).toBe('running')
     expect(create).toHaveBeenCalledTimes(1)
   })
-
   it('does not treat a missing file or other refresh failure as expiry', async () => {
     const { sandbox, create } = mockSandbox()
     const ws = workspace()
@@ -329,7 +288,7 @@ describe('workspace lifecycle', () => {
         throw new FileNotFoundError('missing')
       }, info()),
     ).rejects.toBeInstanceOf(FileNotFoundError)
-    sandbox.setTimeout.mockRejectedValue(new Error('Transient'))
+    sandbox.connect.mockRejectedValue(new Error('Transient'))
     expect(await ws.run(async () => 42, info())).toBe(42)
     expect(create).toHaveBeenCalledTimes(1)
   })
@@ -339,17 +298,17 @@ describe('workspace lifecycle', () => {
     const { sandbox } = mockSandbox()
     const ws = workspace({ sandboxOptions: { timeoutMs: 1000 } })
     await ws.run(async () => 1, info())
-    const calls = sandbox.setTimeout.mock.calls.length
+    const calls = sandbox.connect.mock.calls.length
     const finish = deferred<number>()
     const work = ws.run(() => finish.promise, info())
     await vi.advanceTimersByTimeAsync(2500)
-    expect(sandbox.setTimeout.mock.calls.length - calls).toBe(6)
+    expect(sandbox.connect.mock.calls.length - calls).toBe(6)
     const rejected = expect(work).rejects.toThrow('Execution failed')
     finish.reject(new Error('Execution failed'))
     await rejected
     expect(vi.getTimerCount()).toBe(0)
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(sandbox.setTimeout.mock.calls.length - calls).toBe(7)
+    expect(sandbox.connect.mock.calls.length - calls).toBe(7)
   })
 })
 
@@ -409,7 +368,7 @@ describe('cleanup and deadline boundaries', () => {
     const ws = workspace()
     await ws.run(async () => 1, info())
     const refresh = deferred<void>()
-    sandbox.setTimeout.mockReturnValueOnce(refresh.promise)
+    sandbox.connect.mockReturnValueOnce(refresh.promise)
     const effect = vi.fn(async () => 42)
     const run = ws.run(effect, info())
     await tick()
@@ -424,7 +383,7 @@ describe('cleanup and deadline boundaries', () => {
     const ws = workspace()
     await ws.run(async () => 1, info())
     const refresh = deferred<void>()
-    sandbox.setTimeout.mockReturnValueOnce(refresh.promise)
+    sandbox.connect.mockReturnValueOnce(refresh.promise)
     const effect = vi.fn(async () => 42)
     const run = ws.run(effect, info())
     await tick()
@@ -433,22 +392,6 @@ describe('cleanup and deadline boundaries', () => {
     refresh.resolve()
     await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
     expect(effect).not.toHaveBeenCalled()
-  })
-
-  it('does not run code whose workspace was destroyed while its context was created', async () => {
-    const { sandbox } = mockSandbox()
-    const ws = workspace()
-    await ws.run(async () => 1, info())
-    const context = deferred<{ id: string; language: string; cwd: string }>()
-    sandbox.createCodeContext.mockReturnValueOnce(context.promise)
-    const run = ws.runCode('x', 'python', undefined, info(), {
-      timeoutMs: 10_000,
-    })
-    await tick()
-    await ws.destroy()
-    context.resolve({ id: 'late', language: 'python', cwd: '/home/user' })
-    await expect(run).rejects.toBeInstanceOf(WorkspaceDestroyedError)
-    expect(sandbox.runCode).not.toHaveBeenCalled()
   })
 
   it('does not report success for an operation that finished after destroy', async () => {
@@ -576,21 +519,16 @@ describe('cleanup and deadline boundaries', () => {
     expect(sandbox.commands.run).toHaveBeenCalledWith('kill -9 -- -101')
   })
 
-  it('counts context creation against the deadline and does not claim a kernel restart', async () => {
+  it('does not claim a kernel restart when the deadline hits before the kernel exists', async () => {
     vi.useFakeTimers()
     const { sandbox } = mockSandbox()
-    const context = deferred<{ id: string; language: string; cwd: string }>()
-    sandbox.createCodeContext.mockReturnValueOnce(context.promise)
+    sandbox.runCode.mockReturnValueOnce(new Promise(() => {}))
+    sandbox.listCodeContexts.mockResolvedValueOnce([])
     const ws = workspace()
     const run = ws.runCode('x', 'java', undefined, info(), { timeoutMs: 100 })
     await vi.advanceTimersByTimeAsync(100)
     expect(await run).toEqual({ stopped: 'timed_out', kernelRestarted: false })
-    expect(sandbox.runCode).not.toHaveBeenCalled()
     expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
-    context.resolve({ id: 'ctx-java', language: 'java', cwd: '/home/user' })
-    await vi.advanceTimersByTimeAsync(0)
-    await ws.runCode('y', 'java', undefined, info(), { timeoutMs: 100 })
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -699,20 +637,19 @@ describe('uncertain SDK outcomes', () => {
     ).toHaveProperty('execution')
   })
 
-  it('forgets a code context the kernel server no longer knows', async () => {
+  it('reports a kernel the server no longer knows without restarting anything', async () => {
     const { sandbox } = mockSandbox()
     const ws = workspace()
-    await ws.runCode('a', 'python', undefined, info(), { timeoutMs: 1000 })
     const missing = new NotFoundError('context missing')
     sandbox.runCode.mockRejectedValueOnce(missing)
     expect(
       await ws.runCode('b', 'python', undefined, info(), { timeoutMs: 1000 }),
     ).toEqual({ kernelLost: 'missing', cause: missing })
     expect(sandbox.restartCodeContext).not.toHaveBeenCalled()
-    await ws.runCode('c', 'python', undefined, info(), { timeoutMs: 1000 })
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(2)
+    expect(
+      await ws.runCode('c', 'python', undefined, info(), { timeoutMs: 1000 }),
+    ).toHaveProperty('execution')
   })
-
   it('applies the same start rule to background commands', async () => {
     const { sandbox } = mockSandbox()
     const ws = workspace()
@@ -731,5 +668,144 @@ describe('uncertain SDK outcomes', () => {
     await expect(ws.run(async () => 1, info())).rejects.toBeInstanceOf(
       WorkspaceBlockedError,
     )
+  })
+})
+
+describe('reconnect across processes', () => {
+  const other = () => new Workspace({}, 'Retry destroy.', tag)
+
+  it('another process finds the session sandbox by metadata instead of creating one', async () => {
+    const { sandbox, create, list, connect } = mockSandbox()
+    const a = workspace()
+    const first = info()
+    await a.run(async () => 1, first)
+    expect(first.created).toBe(true)
+    const b = other()
+    const second = info()
+    expect(await b.run(async (box) => box.sandboxId, second)).toBe(
+      sandbox.sandboxId,
+    )
+    expect(second.created).toBe(false)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(list).toHaveBeenCalledWith({
+      query: { metadata: tag, state: ['running', 'paused'] },
+    })
+    expect(connect).toHaveBeenCalledWith(sandbox.sandboxId, {
+      timeoutMs: 300_000,
+    })
+  })
+
+  it('another process resumes a paused session sandbox', async () => {
+    const { sandbox, create, registry } = mockSandbox()
+    await workspace().run(async () => 1, info())
+    registry.pause(sandbox.sandboxId)
+    expect(await other().run(async (box) => box.sandboxId, info())).toBe(
+      sandbox.sandboxId,
+    )
+    expect(registry.alive(sandbox.sandboxId)?.state).toBe('running')
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('never attaches to a sandbox tagged with another session', async () => {
+    const { create, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    await new Workspace({}, 'x', { adkSessionId: 'someone-else' }).run(
+      async () => 1,
+      info(),
+    )
+    const mine = info()
+    await workspace().run(async () => 1, mine)
+    expect(mine.created).toBe(true)
+    expect(boxes).toHaveLength(2)
+    expect(registry.running()).toHaveLength(2)
+  })
+
+  it('resolves a create race by keeping the oldest sandbox and killing its own', async () => {
+    const { create, list, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    const a = workspace()
+    await a.run(async () => 1, info())
+    // Process B listed before A's sandbox was visible, then created its own.
+    list.mockImplementationOnce(() => {
+      let done = false
+      return {
+        get hasNext() {
+          return !done
+        },
+        nextItems: async () => {
+          done = true
+          return []
+        },
+      } as unknown as ReturnType<typeof Sandbox.list>
+    })
+    const b = other()
+    const outcome = info()
+    const used = await b.run(async (box) => box.sandboxId, outcome)
+    expect(boxes).toHaveLength(2)
+    expect(used).toBe(boxes[0]!.sandboxId)
+    expect(outcome.created).toBe(false)
+    expect(boxes[1]!.kill).toHaveBeenCalledTimes(1)
+    expect(registry.running().map((e) => e.box.sandboxId)).toEqual([
+      boxes[0]!.sandboxId,
+    ])
+  })
+
+  it('a destroy from another process surfaces here as expiry, then a new workspace', async () => {
+    const { create } = mockSandbox()
+    statefulSandboxes(create)
+    const a = workspace()
+    await a.run(async () => 1, info())
+    await other().destroy()
+    await expect(a.run(async () => 1, info())).rejects.toBeInstanceOf(
+      WorkspaceExpiredError,
+    )
+    const fresh = info()
+    await a.run(async () => 1, fresh)
+    expect(fresh.created).toBe(true)
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  it('destroy kills session sandboxes this process never held', async () => {
+    const { create, kill, registry } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    await workspace().run(async () => 1, info())
+    const b = other()
+    expect(b.idle).toBe(true)
+    await b.destroy()
+    expect(kill).toHaveBeenCalledWith(boxes[0]!.sandboxId)
+    expect(registry.running()).toHaveLength(0)
+    expect(b.idle).toBe(true)
+  })
+
+  it('a failed sweep kill blocks the workspace until a retry succeeds', async () => {
+    const { create, kill, registry } = mockSandbox()
+    statefulSandboxes(create)
+    await workspace().run(async () => 1, info())
+    kill.mockRejectedValueOnce(new Error('down'))
+    const b = other()
+    await expect(b.destroy()).rejects.toThrow('Sandbox cleanup failed')
+    await expect(b.run(async () => 1, info())).rejects.toThrow('Retry destroy.')
+    await b.destroy()
+    expect(registry.running()).toHaveLength(0)
+    expect(await b.run(async () => 2, info())).toBe(2)
+  })
+
+  it('reports a sandbox that vanished mid-operation as expired, not blocked', async () => {
+    vi.useFakeTimers()
+    const { sandbox, registry } = mockSandbox()
+    sandbox.handle.wait.mockReturnValueOnce(new Promise(() => {}))
+    sandbox.commands.run.mockImplementation(async (_command, opts) => {
+      if (opts?.background) return sandbox.handle
+      // Killed elsewhere while the command ran: the kill request fails too.
+      registry.kill(sandbox.sandboxId)
+      throw new Error('connection lost')
+    })
+    const ws = workspace()
+    const run = ws
+      .runCommand('loop', {}, info(), { timeoutMs: 100 })
+      .catch((error) => error)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await run).toBeInstanceOf(WorkspaceExpiredError)
+    expect(ws.idle).toBe(true)
   })
 })

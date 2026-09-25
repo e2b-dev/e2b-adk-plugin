@@ -2,7 +2,7 @@
 
 Give [Google ADK](https://github.com/google/adk-js) agents code, shell, file and background-process tools in an isolated [E2B](https://e2b.dev) sandbox. `E2BToolset` gives each ADK session its own lazily created workspace, which persists across the messages of that conversation until your application releases it or the sandbox times out.
 
-> **Single process only.** Workspaces are tracked in the memory of one `E2BToolset` instance. If several server instances handle one conversation (for example Cloud Run with more than one instance, where session affinity is only best effort), a later message can reach an instance that does not know the session's sandbox; it then starts an empty one, and the earlier files and variables are no longer available to the agent.
+> Sandboxes are tagged with their ADK session, so any server instance, and a restarted one, finds a conversation's sandbox again. Several instances behind a load balancer, such as Cloud Run, can serve one conversation.
 
 ## Install
 
@@ -68,7 +68,7 @@ try {
 | `list_files`               | optional `path` (default `.`)                          | `entries`, `truncated`                     |
 | `start_background_command` | `command`, optional `cwd`, `envs`, `timeoutMs`, `port` | `pid`, `preview_url`, optional `readiness` |
 
-`run_code` supports `python` (default), `javascript`, `typescript`, `r`, `java` and `bash`, with one stateful kernel per language in each workspace. Commands start independent processes; their working directory and environment changes do not carry into the next command, but files do.
+`run_code` supports `python` (default), `javascript`, `typescript`, `r`, `java` and `bash`, with one stateful kernel per language in each sandbox, shared by every instance serving the session. Commands start independent processes; their working directory and environment changes do not carry into the next command, but files do.
 
 `success` means the operation ran. Code that raises still returns `success: true` with an `error`; a command exiting nonzero returns `success: true` with its `exit_code`. Invalid arguments and SDK/transport failures return `success: false` with an `error` rather than aborting the agent loop. SDK error messages are sanitized to their error class, such as `(FileNotFoundError)`. Each text output is limited to 10,000 characters; directory listings contain at most 100 entries and indicate truncation.
 
@@ -76,9 +76,9 @@ The call that creates a workspace also returns `workspace: "new"`. If the sandbo
 
 ## Workspaces and cleanup
 
-One `E2BToolset` can serve a module-level agent, the pattern `adk web` and `adk api_server` use. Workspaces are keyed by the ADK session (`appName`, `userId` and session `id`), never by model arguments, so concurrent sessions get separate sandboxes. Later messages and runs resumed after a tool confirmation reuse their session's files, kernels and background processes. Overlapping runs of one session share its workspace; their operations run one at a time. Unlike the Python `e2b-adk` plugin, which shares one sandbox across all users of a runner, sessions never share a sandbox.
+One `E2BToolset` can serve a module-level agent, the pattern `adk web` and `adk api_server` use. Workspaces are keyed by the ADK session (`appName`, `userId` and session `id`), never by model arguments, so concurrent sessions get separate sandboxes. The key is written into the sandbox's metadata as `adkAppName`, `adkUserId` and `adkSessionId`; a process that does not hold the sandbox looks it up by that metadata and connects, resuming it if it was paused. This is how E2B's Vercel AI SDK and Mastra integrations work. If two instances create a sandbox for the same session at the same moment, the older one wins and the other is killed. Later messages and runs resumed after a tool confirmation reuse their session's files, kernels and background processes. Overlapping runs of one session share its workspace; their operations run one at a time.
 
-ADK `close()` does not release session workspaces: ADK 2.1.0 calls it after every `runAsync()` without saying which run ended. The application owns cleanup through `destroySession(session)` and `destroyAll()`; the sandbox timeout remains the fallback. `destroySession()` kills the session's sandbox (waiting for one that is still being created), fails its pending operations without recreating anything, and lets later messages in that session start a new workspace. If a kill fails, the call rejects, the workspace stays blocked, and a later `destroySession()` or `destroyAll()` retries. `destroyAll()` attempts every workspace before reporting failures; use it on shutdown.
+ADK `close()` does not release session workspaces: ADK 2.1.0 calls it after every `runAsync()` without saying which run ended. The application owns cleanup through `destroySession(session)` and `destroyAll()`; the sandbox timeout remains the fallback. `destroySession()` kills the session's sandbox (waiting for one that is still being created), fails its pending operations without recreating anything, and lets later messages in that session start a new workspace. If a kill fails, the call rejects, the workspace stays blocked, and a later `destroySession()` or `destroyAll()` retries. `destroySession()` also kills sandboxes of that session created by other instances or before a restart. `destroyAll()` attempts every workspace this process knows before reporting failures; use it on shutdown. To sweep sandboxes of every session, for example after a crash, list them by the `adkAppName` metadata with the E2B SDK and kill them.
 
 A running sandbox is billed per second from the session's first tool call until it is destroyed or times out. Call `destroySession()` when a conversation ends; otherwise the idle timeout (five minutes by default) after the last message is billed as well.
 
@@ -105,7 +105,7 @@ const toolset = new E2BToolset({
 
 `start_background_command` returns immediately and keeps the process running until it exits, its optional `timeoutMs` passes, or the workspace ends. A preview URL is syntactic and has `readiness: "unknown"`.
 
-The E2B SDK buffers command and code output in memory before it is truncated. The adapter does not log tool arguments or SDK error bodies. Configure ADK and SDK tracing separately if your application handles sensitive inputs.
+Two instances can run code in the same kernel at once; the kernel executes serially, and a timeout in one instance restarts the kernel for both. The E2B SDK buffers command and code output in memory before it is truncated. The adapter does not log tool arguments or SDK error bodies. Configure ADK and SDK tracing separately if your application handles sensitive inputs.
 
 ## Direct code executor
 

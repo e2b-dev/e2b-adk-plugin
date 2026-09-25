@@ -6,24 +6,21 @@ import {
 } from '@google/adk'
 import type { E2BCodeExecutorOptions } from './options.js'
 import { kernelLost, operationError, truncate } from './results.js'
+import { sessionTag } from './toolset.js'
 import { operationLimit, Workspace } from './workspace.js'
 
 type ExecuteParams = Parameters<BaseCodeExecutor['executeCode']>[0]
 
 /** Stateful code execution in one E2B workspace, owned by one ADK session. */
 export class E2BCodeExecutor extends BaseCodeExecutor {
-  private readonly workspace: Workspace
+  private workspace?: Workspace
   private readonly timeoutMs: number
   private sessionKey?: string
 
-  constructor(options: E2BCodeExecutorOptions = {}) {
+  constructor(private readonly options: E2BCodeExecutorOptions = {}) {
     super()
     // Executor calls carry no limit: keep the SDK's 60 s default, capped by maxOperationMs.
     this.timeoutMs = Math.min(60_000, operationLimit(options))
-    this.workspace = new Workspace(
-      options,
-      'Retry close() before using this executor.',
-    )
     this.stateful = true
     // ADK's response processor currently labels extracted blocks as Python.
     this.codeBlockDelimiters = [
@@ -71,6 +68,11 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
       )
     }
     this.sessionKey = key
+    this.workspace ??= new Workspace(
+      this.options,
+      'Retry close() before using this executor.',
+      sessionTag(invocationContext.session),
+    )
     try {
       const outcome = await this.workspace.runCode(
         input.code,
@@ -106,6 +108,6 @@ export class E2BCodeExecutor extends BaseCodeExecutor {
 
   /** Releases the workspace; a later call starts a new one. The instance stays bound to its original session. */
   async close(): Promise<void> {
-    await this.workspace.destroy()
+    await this.workspace?.destroy()
   }
 }

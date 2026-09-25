@@ -65,10 +65,18 @@ class SafeFunctionTool<T extends z.ZodObject> extends FunctionTool<T> {
 const key = ({ appName, userId, id }: SessionRef) =>
   JSON.stringify([appName, userId, id])
 
+/** Sandbox metadata that lets any process find a session's sandbox again. */
+export const sessionTag = ({ appName, userId, id }: SessionRef) => ({
+  adkAppName: appName,
+  adkUserId: userId,
+  adkSessionId: id,
+})
+
 /**
  * Six agent-callable tools. Each ADK session gets its own lazily created
- * sandbox, kept until the application calls destroySession()/destroyAll() or
- * the sandbox timeout releases it. ADK's automatic close() leaves it running.
+ * sandbox, tagged with the session so any process finds it again, and kept
+ * until the application calls destroySession()/destroyAll() or the sandbox
+ * timeout releases it. ADK's automatic close() leaves it running.
  */
 export class E2BToolset extends BaseToolset {
   private readonly workspaces = new Map<string, Workspace>()
@@ -263,7 +271,7 @@ export class E2BToolset extends BaseToolset {
   private workspace(session: SessionRef): Workspace {
     let workspace = this.workspaces.get(key(session))
     if (!workspace) {
-      workspace = new Workspace(this.options, CLEANUP_HINT)
+      workspace = new Workspace(this.options, CLEANUP_HINT, sessionTag(session))
       this.workspaces.set(key(session), workspace)
     }
     return workspace
@@ -312,18 +320,20 @@ export class E2BToolset extends BaseToolset {
    */
   override async close(): Promise<void> {}
 
-  /** Kill the session's sandbox. Later calls in that session start a new workspace. */
+  /**
+   * Kill the session's sandbox, wherever it was created. Later calls in that
+   * session start a new workspace.
+   */
   async destroySession(session: SessionRef): Promise<void> {
     const id = key(session)
-    const workspace = this.workspaces.get(id)
-    if (!workspace) return
+    const workspace = this.workspace(session)
     await workspace.destroy()
     // Forget it only if no newer call has started using it meanwhile.
     if (workspace.idle && this.workspaces.get(id) === workspace)
       this.workspaces.delete(id)
   }
 
-  /** Destroy every workspace, continuing past failures; failed ones stay retryable. */
+  /** Destroy every workspace this process knows, continuing past failures; failed ones stay retryable. */
   async destroyAll(): Promise<void> {
     const results = await Promise.allSettled(
       [...this.workspaces.values()].map((workspace) => workspace.destroy()),

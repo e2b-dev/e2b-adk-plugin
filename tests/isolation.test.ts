@@ -111,7 +111,7 @@ describe('session-scoped workspaces', () => {
     )
     expect(second.every((r) => r.success && !('workspace' in r))).toBe(true)
     expect(create).toHaveBeenCalledTimes(1)
-    expect(sandbox.createCodeContext).toHaveBeenCalledTimes(1)
+    expect(sandbox.runCode).toHaveBeenCalledTimes(2)
     expect(sandbox.kill).not.toHaveBeenCalled()
   })
 
@@ -321,5 +321,49 @@ describe('session-scoped workspaces', () => {
     expect(boxes.map((box) => box.kill.mock.calls.length)).toEqual([1, 2, 1])
     await toolset.destroyAll()
     expect(boxes.map((box) => box.kill.mock.calls.length)).toEqual([1, 2, 1])
+  })
+
+  it('a second server instance continues the conversation in the same sandbox', async () => {
+    const { create } = mockSandbox()
+    const boxes = statefulSandboxes(create)
+    // Two E2BToolset instances are two processes sharing the E2B account.
+    const instanceA = app()
+    const instanceB = app()
+    const s = await instanceA.session('alice')
+    // The shared session store (a database in production) knows the session on B too.
+    await instanceB.runner.sessionService.createSession({
+      appName: instanceB.runner.appName,
+      userId: 'alice',
+      sessionId: s.id,
+    })
+    await instanceA.ask(s, plan(write('from-a')))
+    expect((await instanceB.ask(s, plan(read)))[0]).toMatchObject({
+      success: true,
+      content: 'from-a',
+    })
+    expect(create).toHaveBeenCalledTimes(1)
+    await instanceB.toolset.destroySession(s)
+    expect(boxes[0]!.kill).toHaveBeenCalledTimes(1)
+    expect((await instanceA.ask(s, plan(read)))[0]).toMatchObject({
+      success: false,
+      workspace_expired: true,
+    })
+    expect((await instanceA.ask(s, plan(read)))[0]).toMatchObject({
+      success: false,
+      workspace: 'new',
+    })
+    expect(create).toHaveBeenCalledTimes(2)
+  })
+
+  it('destroySession after a restart still finds and kills the session sandbox', async () => {
+    const { create, registry } = mockSandbox()
+    statefulSandboxes(create)
+    const before = app()
+    const s = await before.session('alice')
+    await before.ask(s, plan(write('x')))
+    expect(registry.running()).toHaveLength(1)
+    // A fresh process that never served this session.
+    await new E2BToolset().destroySession(s)
+    expect(registry.running()).toHaveLength(0)
   })
 })

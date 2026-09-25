@@ -44,7 +44,7 @@ describe('real ADK runner integration', () => {
       runner.runEphemeral({ userId: 'user', newMessage: message }),
     )
     expect(sandbox.runCode).toHaveBeenCalledWith('6 * 7', {
-      context: { id: 'ctx-python', language: 'python', cwd: '/home/user' },
+      language: 'python',
       envs: undefined,
       timeoutMs: 65_000,
     })
