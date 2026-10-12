@@ -1,72 +1,158 @@
 name: Release
 
+# Releases are cut by hand: write changesets (`pnpm changeset`), merge them, then
+# `gh workflow run release.yml --ref main`. One run versions and publishes both packages:
+# @e2b/adk to npm and e2b-adk to PyPI, both over OIDC trusted publishing (no tokens).
+# Both registries trust this file and the `deployment` environment.
 on:
-  release:
-    types: [published]
+  workflow_dispatch: {}
+
+concurrency: release-${{ github.ref }}
 
 permissions:
   contents: read
 
 jobs:
-  build:
-    name: Build and test distributions
+  preflight:
+    name: Release preflight
     runs-on: ubuntu-latest
-
+    outputs:
+      release: ${{ steps.version.outputs.release }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check the ref
+        # `workflow_dispatch` offers every branch in the picker, and a feature branch
+        # carrying changesets would otherwise publish real packages from that branch.
+        if: github.ref != 'refs/heads/main'
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::Releases must run on main; this run is on ${REF}."
+          exit 1
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Check for pending changesets
+        id: version
+        run: echo "release=$(./.github/scripts/is_release.sh)" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Build and test
+    needs: preflight
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          version: "0.11.19"
-          python-version: "3.13"
+          node-version: 22
+          cache: pnpm
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: '3.13'
           enable-cache: true
-          cache-dependency-glob: uv.lock
+          cache-dependency-glob: packages/e2b-adk-python/uv.lock
 
-      - name: Install dependencies
-        run: uv sync --locked --extra dev
+      - run: pnpm install --frozen-lockfile
 
-      - name: Run unit tests
-        run: uv run pytest
+      - run: uv sync --frozen --extra dev
+        working-directory: packages/e2b-adk-python
 
-      - name: Run lint checks
-        run: uv run ruff check e2b_adk tests examples
-
-      - name: Run type checks
-        run: uv run mypy e2b_adk
-
-      - name: Build distributions
-        run: uv run python -m build
-
-      - name: Check package metadata
-        run: uv run twine check dist/*
-
-      - name: Upload distributions
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        with:
-          name: python-package-distributions
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
+      - run: pnpm check
 
   publish:
-    name: Publish to PyPI
-    needs: build
+    name: Version and publish
+    needs: [preflight, test]
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/e2b-adk
+    # Both trusted publishers (npm and PyPI) are pinned to this environment, and its
+    # deployment branch policy only allows main.
+    environment: deployment
     permissions:
-      contents: read
+      contents: write
       id-token: write
-
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        id: app-token
         with:
-          name: python-package-distributions
-          path: dist
+          app-id: ${{ vars.VERSION_BUMPER_APPID }}
+          private-key: ${{ secrets.VERSION_BUMPER_SECRET }}
 
-      - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: '3.13'
+          enable-cache: true
+          cache-dependency-glob: packages/e2b-adk-python/uv.lock
+
+      - name: Update npm
+        # npm trusted publishing needs npm 11.5.1 or newer.
+        run: |
+          npm install -g npm@^11.6
+          npm --version
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: uv sync --frozen --extra dev
+        working-directory: packages/e2b-adk-python
+
+      - name: No local dependencies
+        # A file: or link: dependency would publish a local path in package.json or the
+        # Python sdist, and nothing outside this repo could install it.
+        run: |
+          if grep -nE '"(file|link):' package.json packages/*/package.json || grep -nE '(file|path) *=' packages/e2b-adk-python/pyproject.toml; then
+            echo "::error::Local dependency paths found; point them at published versions before releasing."
+            exit 1
+          fi
+
+      - name: Create new versions
+        run: pnpm run version
+
+      - name: Commit new versions
+        id: commit
+        # Commit before publishing, because `changeset publish` tags whatever HEAD it
+        # publishes from.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # `add -A`: `changeset version` writes each CHANGELOG.md as a new file the first time.
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::error::'changeset version' produced no changes, so there is nothing to publish or tag."
+            exit 1
+          fi
+          git commit -m "[skip ci] Release new versions"
+
+      - name: Publish
+        id: release
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        with:
+          publish: pnpm run release
+          createGithubReleases: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push new versions
+        # Keep the version bump even after a partial publish, so a later release cannot
+        # reuse a version that one registry already has.
+        if: always() && steps.commit.outcome == 'success' && steps.release.outcome != 'skipped'
+        run: |
+          if ! git push; then
+            git fetch origin "${GITHUB_REF_NAME}"
+            git merge --no-edit FETCH_HEAD
+            git push
+          fi
