@@ -1,34 +1,28 @@
-# E2B for Google ADK
+# E2B for Google ADK (TypeScript)
 
-Give [Google ADK](https://github.com/google/adk-js) agents code, shell, file and background-process tools in an isolated [E2B](https://e2b.dev) sandbox. `E2BToolset` gives each ADK session its own lazily created workspace, which persists across the messages of that conversation until your application releases it or the sandbox times out.
-
-> Sandboxes are tagged with their ADK session, so any server instance, and a restarted one, finds a conversation's sandbox again. Several instances behind a load balancer, such as Cloud Run, can serve one conversation.
+Give [Google ADK](https://github.com/google/adk-js) agents code, shell, file and background-process tools that run in an isolated [E2B](https://e2b.dev) sandbox. Each ADK session gets its own sandbox, which keeps files and kernel state across the messages of that conversation.
 
 ## Install
 
-Requires Node.js 22 or later and an ESM project (`"type": "module"` in `package.json`). Tested with Google ADK 2.1.0.
+Requires Node.js 22 or later and an ESM project (`"type": "module"`). Tested with Google ADK 2.1.0.
 
 ```bash
 npm install @google/adk @e2b/adk
 npm install --save-dev tsx typescript @types/node
 ```
 
-Set credentials in your application's environment:
-
 ```bash
 export E2B_API_KEY="..."
 export GOOGLE_API_KEY="..."
 ```
 
-The integration is model-independent. The examples use Gemini 2.5 Flash through ADK's built-in provider. Credentials are used by the local SDKs and are not forwarded into the sandbox unless explicitly supplied in `envs`.
-
-## Agent tools
+## Quick start
 
 ```typescript
 import { E2BToolset } from '@e2b/adk'
 import { InMemoryRunner, LlmAgent } from '@google/adk'
 
-// Create once per application, like any ADK root agent.
+// One toolset per application, like the root agent.
 const toolset = new E2BToolset()
 const runner = new InMemoryRunner({
   agent: new LlmAgent({
@@ -59,36 +53,40 @@ try {
 }
 ```
 
-| Tool                       | Arguments                                              | Result fields besides `success`            |
-| -------------------------- | ------------------------------------------------------ | ------------------------------------------ |
-| `run_code`                 | `code`, optional `language`, `envs`, `timeoutMs`       | `stdout`, `stderr`, `text`, `error`        |
-| `run_command`              | `command`, optional `cwd`, `envs`, `timeoutMs`         | `stdout`, `stderr`, `exit_code`            |
-| `write_file`               | `path`, `content`                                      | `path`                                     |
-| `read_file`                | `path`                                                 | `path`, `content`                          |
-| `list_files`               | optional `path` (default `.`)                          | `entries`, `truncated`                     |
-| `start_background_command` | `command`, optional `cwd`, `envs`, `timeoutMs`, `port` | `pid`, `preview_url`, optional `readiness` |
+## Tools
 
-`run_code` supports `python` (default), `javascript`, `typescript`, `r`, `java` and `bash`, with one stateful kernel per language in each sandbox, shared by every instance serving the session. Commands start independent processes; their working directory and environment changes do not carry into the next command, but files do.
+| Tool                       | Arguments                                     | Returns                             |
+| -------------------------- | --------------------------------------------- | ----------------------------------- |
+| `run_code`                 | `code`, `language`, `envs`, `timeoutMs`       | `stdout`, `stderr`, `text`, `error` |
+| `run_command`              | `command`, `cwd`, `envs`, `timeoutMs`         | `stdout`, `stderr`, `exit_code`     |
+| `write_file`               | `path`, `content`                             | `path`                              |
+| `read_file`                | `path`                                        | `path`, `content`                   |
+| `list_files`               | `path` (default `.`)                          | `entries`, `truncated`              |
+| `start_background_command` | `command`, `cwd`, `envs`, `timeoutMs`, `port` | `pid`, `preview_url`, `readiness`   |
 
-`success` means the operation ran. Code that raises still returns `success: true` with an `error`; a command exiting nonzero returns `success: true` with its `exit_code`. Invalid arguments and SDK/transport failures return `success: false` with an `error` rather than aborting the agent loop. SDK error messages are sanitized to their error class, such as `(FileNotFoundError)`. Each text output is limited to 10,000 characters; directory listings contain at most 100 entries and indicate truncation.
+`run_code` takes `python` (default), `javascript`, `typescript`, `r`, `java` or `bash`, with one kernel per language per sandbox.
 
-The call that creates a workspace also returns `workspace: "new"`. If the sandbox has expired or was deleted, the next call returns `success: false` with `workspace_expired: true`; the call after that starts a new, empty workspace. Agent instructions should tell the model to check these fields.
+- `success: true` means the operation ran. Code that raises returns an `error`; a nonzero exit returns `exit_code`.
+- `success: false` means it could not run, for example invalid arguments or a transport failure. The agent loop keeps going.
+- The call that creates a workspace returns `workspace: "new"`. If the sandbox expired, the next call returns `workspace_expired: true`, and the call after it starts an empty workspace.
 
-## Workspaces and cleanup
+Tell the model to check these fields.
 
-One `E2BToolset` can serve a module-level agent, the pattern `adk web` and `adk api_server` use. Workspaces are keyed by the ADK session (`appName`, `userId` and session `id`), never by model arguments, so concurrent sessions get separate sandboxes. The key is written into the sandbox's metadata as `adkAppName`, `adkUserId` and `adkSessionId`; a process that does not hold the sandbox looks it up by that metadata and connects, resuming it if it was paused. This is how E2B's Vercel AI SDK and Mastra integrations work. If two instances create a sandbox for the same session at the same moment, each re-checks the list and switches to the older sandbox it sees, killing its own; if that kill fails its workspace stays blocked until `destroySession()` retries. E2B's list is not transactional, so this is best effort, not a lock: an instance whose re-check does not show the other sandbox yet keeps its own, and a losing sandbox whose creator crashed lives until its timeout. One workspace per session across processes is not guaranteed without coordination outside E2B. Set `namespace` when several deployments, such as staging and production, share one E2B API key and app name; it is written as `adkNamespace` (`default` when unset) and is part of the metadata used to find, reuse and destroy sandboxes, so an instance without a namespace never touches a namespaced deployment's sandboxes. Later messages and runs resumed after a tool confirmation reuse their session's files, kernels and background processes. Overlapping runs of one session share its workspace. Within one server instance their operations run one at a time; across instances they run concurrently on the same sandbox, where commands are separate processes and each language kernel executes one request at a time.
+## Sessions and cleanup
 
-ADK `close()` does not release session workspaces: ADK 2.1.0 calls it after every `runAsync()` without saying which run ended. The application owns cleanup through `destroySession(session)` and `destroyAll()`; the sandbox timeout remains the fallback. `destroySession()` kills the session's sandbox (waiting for one that is still being created), fails its pending operations without recreating anything, and lets later messages in that session start a new workspace. If a kill fails, the call rejects, the workspace stays blocked, and a later `destroySession()` or `destroyAll()` retries. `destroySession()` also kills sandboxes of that session created by other instances or before a restart; an operation running on another instance then fails with `workspace_expired`. `destroyAll()` attempts every workspace this process knows before reporting failures; use it on shutdown. To sweep sandboxes of every session, for example after a crash, list them by the `adkAppName` metadata with the E2B SDK and kill them.
+Workspaces are keyed by ADK session (`appName`, `userId` and session `id`). The key is stored in the sandbox metadata, so any server instance, including a restarted one, finds the conversation's sandbox and connects to it. Several instances behind a load balancer can serve one conversation without session affinity.
 
-A running sandbox is billed per second from the session's first tool call until it is destroyed or times out. Call `destroySession()` when a conversation ends; otherwise the idle timeout (five minutes by default) after the last message is billed as well.
+- **ADK's `close()` does not release a workspace.** ADK calls it after every run without saying which one ended, so the toolset treats it as a no-op.
+- **Release sessions yourself.** Call `destroySession(session)` when a conversation ends, and `destroyAll()` on shutdown.
+- **Billing.** A sandbox is billed from its first tool call until it is destroyed or times out. The default idle timeout is five minutes.
 
-`runEphemeral()` creates a session whose id your code never sees, so each call leaves a workspace that only `destroyAll()` or the sandbox timeout releases. Prefer `runAsync()` with sessions you create.
+Set `namespace` when staging and production share one E2B API key and app name, so each deployment finds only its own sandboxes.
 
-## Configuration and limits
+## Configuration
 
 ```typescript
 const toolset = new E2BToolset({
-  template: 'your-code-interpreter-template',
+  template: 'your-template',
   namespace: 'production',
   maxOperationMs: 600_000,
   sandboxOptions: {
@@ -100,40 +98,27 @@ const toolset = new E2BToolset({
 })
 ```
 
-`template` selects the E2B template; omit it to use the Code Interpreter default. Custom templates must support the interpreters you intend to use and provide util-linux `setsid`. `sandboxOptions` accepts the E2B SDK's creation options except `template`; unspecified options keep the SDK defaults, so an idle sandbox is killed after five minutes. With `lifecycle: { onTimeout: 'pause' }` an idle sandbox is paused instead, and the next tool call in that session resumes it with its files and kernel state. Paused sandboxes are not billed and do not count toward the concurrency limit, but E2B keeps them until they are killed. Choose pause only if your application destroys finished sessions.
+- `template`: E2B template. It must include the interpreters you use and util-linux `setsid`.
+- `sandboxOptions`: the E2B SDK creation options, except `template`. Unset options keep the SDK defaults.
+- `maxOperationMs`: upper bound for one `run_code` or `run_command`, default 10 minutes. The model's `timeoutMs` cannot exceed it.
+- `namespace`: separates deployments that share an API key and app name.
 
-`maxOperationMs` (default 10 minutes, at most 2,147,483,647) bounds a single `run_code` or `run_command`. The model may pass `timeoutMs` from 1 up to that limit; omitted, it defaults to 60 seconds, as in the E2B SDK. The deadline starts when the operation starts running, not while it waits for an earlier one. When a deadline passes or the ADK run is aborted (`runAsync({ abortSignal })`), a command is killed with all its child processes and returns `timed_out` or `aborted`; code is stopped by restarting its kernel and returns `kernel_restarted: true`, because its variables are lost. The code may have finished just before the restart, and a timeout does not undo the files it wrote. The deadline also covers starting the command or kernel; if no kernel is listed yet, the adapter waits for the request to settle and restarts the kernel it started, returns the result if the code finished meanwhile, and otherwise blocks the workspace. If a kernel cannot be restarted, or the adapter cannot confirm that a stopped command and its process group are gone, the workspace is blocked until `destroySession()`. The same applies when the connection fails while a command starts or runs, because the command may still be running: a lost command stream is followed by a process-group kill, a lost code stream by a kernel restart (reported with `kernel_restarted: true`), and a start with an unknown outcome, including a failed code request with no kernel to restart, blocks the workspace. A start the sandbox refuses, such as a missing `cwd`, is an ordinary error the model can correct. If the kernel server no longer knows a language's context, the result has `kernel_reset: true` and the next call starts an empty kernel. Files in the sandbox are kept in both cases. `maxOperationMs` covers execution, including command and kernel start-up; creating or resuming the sandbox is bounded by the SDK's request timeout. Processes that start their own session with `setsid` escape this cleanup. Active operations keep extending the sandbox timeout.
-
-`start_background_command` returns immediately and keeps the process running until it exits, its optional `timeoutMs` passes, or the workspace ends. A preview URL is syntactic and has `readiness: "unknown"`.
-
-Two instances can run code in the same kernel at once; the kernel executes serially, and a timeout in one instance restarts the kernel for both. The E2B SDK buffers command and code output in memory before it is truncated. The adapter does not log tool arguments or SDK error bodies. Configure ADK and SDK tracing separately if your application handles sensitive inputs.
+With `lifecycle: { onTimeout: 'pause' }`, an idle sandbox is paused and resumed by the next call in its session, with files and kernel state intact. Paused sandboxes are not billed, but they stay until destroyed, so use pause only if your application calls `destroySession()`.
 
 ## Direct code executor
 
-`E2BCodeExecutor` implements ADK's `BaseCodeExecutor`. Call `executeCode({ invocationContext, codeExecutionInput })` and call `close()` when you are done. See the complete [direct executor example](examples/code-executor.ts).
+`E2BCodeExecutor` implements ADK's `BaseCodeExecutor` for direct `executeCode()` calls. It keeps kernel state until `close()`. See the [direct executor example](examples/code-executor.ts).
 
-**ADK 2.1.0 limitation:** setting `LlmAgent({ codeExecutor })` alone does not execute model responses: ADK does not register its code execution response processor. Use `E2BToolset` for an autonomous agent. This package does not install a custom processor or import ADK internals.
-
-Direct calls accept ADK's `CodeExecutionLanguage.PYTHON`, `JAVASCRIPT`, `TYPESCRIPT` and `SHELL` (mapped to bash). Unsupported languages, nonempty `inputFiles` and nonempty `args` return a descriptive `stderr` without creating a sandbox. Output contains bounded `stdout`/`stderr` and `outputFiles: []`; automatic file staging and artifact collection are not supported. Each call is limited to 60 seconds (or `maxOperationMs`, if lower); a timed-out call restarts the kernel. The executor keeps kernel state until `close()`, which releases the sandbox; a later call starts a new one. It stays bound to its first ADK session to prevent accidental cross-session sharing.
+Setting `LlmAgent({ codeExecutor })` alone does not run model-generated code in ADK 2.1.0. Use `E2BToolset` for an autonomous agent.
 
 ## Examples and development
 
-- [Data analysis agent](examples/data-analysis.ts): a two-message conversation that saves a CSV once and reuses it.
-- [Direct code executor](examples/code-executor.ts): reuse a stateful Python kernel through the ADK executor contract.
+- [Data analysis agent](examples/data-analysis.ts): two messages in one conversation; the CSV saved by the first is reused by the second.
+- [Direct code executor](examples/code-executor.ts)
 
 ```bash
 pnpm install --frozen-lockfile
 pnpm check
 ```
 
-Tests use real ADK runtime objects with mocked models and E2B SDK calls. Network access is blocked by the test fixtures; no API credentials are needed for CI. CI runs on Node 22 and 24.
-
-For examples and paid live checks, copy `.env.example` to `.env` and supply your credentials locally:
-
-```bash
-pnpm example:analysis
-pnpm example:executor
-pnpm test:live
-```
-
-Live checks create real E2B sandboxes and make Gemini requests (`LIVE_MODEL=openai pnpm test:live agent` uses a small OpenAI model through a test-only adapter instead). They verify the tools in every language, stopping commands and code, pause and resume, expiry, and a multi-user conversation with confirmation and cancellation. They clean up only workspaces tagged with their unique test-run ID and are never part of `pnpm check` or CI.
+Unit tests use real ADK objects with mocked models and E2B SDK calls, so CI needs no credentials. Live checks use real E2B sandboxes and a model. Copy `.env.example` to `.env`, then run `pnpm test:live`. They are never part of `pnpm check` or CI.
