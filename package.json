@@ -1,0 +1,19 @@
+{
+  "name": "e2b-adk-plugin",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "build": "pnpm --filter @e2b/adk build",
+    "test": "pnpm --filter @e2b/adk test",
+    "test:py": "pnpm --filter @e2b/adk-python test",
+    "test:all": "pnpm test && pnpm test:py",
+    "check": "pnpm -r run check",
+    "changeset": "changeset",
+    "version": "changeset version && pnpm -r run postVersion && pnpm -r run lock",
+    "release": "pnpm build && pnpm --filter @e2b/adk-python run release && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "2.31.1"
+  }
+}

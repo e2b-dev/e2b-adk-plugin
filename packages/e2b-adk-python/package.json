@@ -1,0 +1,15 @@
+{
+  "name": "@e2b/adk-python",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test": "uv run --frozen --extra dev pytest",
+    "lint": "uv run --frozen --extra dev ruff check e2b_adk tests examples",
+    "typecheck": "uv run --frozen --extra dev mypy e2b_adk",
+    "build": "rm -rf dist && uv build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "postVersion": "uv version --frozen $(pnpm pkg get version | tr -d '\"')",
+    "lock": "uv lock",
+    "release": "rm -rf dist && uv build && uv publish --trusted-publishing always --check-url https://pypi.org/simple/"
+  }
+}
