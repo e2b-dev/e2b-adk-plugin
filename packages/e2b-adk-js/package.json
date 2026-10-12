@@ -4,10 +4,17 @@
   "description": "E2B sandbox tools and code execution for Google ADK.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/e2b-dev/e2b-adk-plugin.git",
+    "directory": "packages/e2b-adk-js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@10.34.5",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
