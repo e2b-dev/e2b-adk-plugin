@@ -479,7 +479,7 @@ wheels = [
 
 [[package]]
 name = "e2b-adk"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "e2b" },
@@ -511,7 +511,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "python-dotenv", marker = "extra == 'examples'" },
     { name = "ruff", marker = "extra == 'dev'" },
-    { name = "twine", marker = "extra == 'dev'" },
+    { name = "twine", marker = "extra == 'dev'", specifier = ">=7.0.0" },
 ]
 provides-extras = ["dev", "examples"]
 
