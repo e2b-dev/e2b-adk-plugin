@@ -1,0 +1,61 @@
+{
+  "name": "@e2b/adk",
+  "version": "0.1.1",
+  "description": "E2B sandbox tools and code execution for Google ADK.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/e2b-dev/e2b-adk-plugin.git",
+    "directory": "packages/e2b-adk-js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:live": "node --env-file=.env --import tsx scripts/live.ts",
+    "example:analysis": "node --env-file=.env --import tsx examples/data-analysis.ts",
+    "example:executor": "node --env-file=.env --import tsx examples/code-executor.ts",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm build",
+    "prepack": "pnpm build"
+  },
+  "peerDependencies": {
+    "@google/adk": "^2.1.0"
+  },
+  "dependencies": {
+    "@e2b/code-interpreter": "^2.8.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@google/adk": "2.1.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^3.2.4"
+  }
+}
